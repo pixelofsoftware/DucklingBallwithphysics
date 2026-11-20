@@ -1,0 +1,15 @@
+metadata:
+  name: pilki_fizyka
+  version: '1.0.0'
+  license: MIT
+  description: Piłki z fizyką - krok 5 tutorialu "Gry 2D w Ducklingu"
+dependencies:
+  swiat_pilek:
+    source:
+      path: '../swiat'
+  fizyka:
+    source:
+      path: '../zewnetrzne/fizyka'
+  grafika:
+    source:
+      path: '../zewnetrzne/grafika'
