@@ -1,0 +1,191 @@
+#{
+    Piłki z fizyką: okno, mysz, klawiatura i rysowanie (pakiet grafika).
+
+    Lewy przycisk myszy wrzuca piłkę w miejscu kursora, G odwraca grawitację,
+    C usuwa wszystkie piłki, Esc albo zamknięcie okna kończy program.
+    Ruch i zderzenia liczy pakiet fizyka (moduł swiat_pilek, tu pod nazwą model), tu tylko rysujemy.
+#}
+import grafika;
+import swiat_pilek as model;
+import fizyka.start as start;
+import fizyka.gra as gra;
+import fizyka.kola.*;
+import core.builtins as builtins;
+
+extern("C") {
+    fundecl write(fd: i32, data: cptr char, size: u64) -> i64;
+    fundecl getenv(name: cptr char) -> cptr char;
+}
+
+const TLO: u32 = 0x18202affu32;
+const SCIANA: u32 = 0x3a4556ffu32;
+const PODLOGA: u32 = 0x5b6b7fffu32;
+
+fun bladNaEkran(tekst: str) -> () = {
+    write(2i32, builtins.ptr_from_slice[char](tekst) as cptr char, tekst.length() as u64);
+}
+
+# Kolor piłki według numeru, żeby było widać, która jest która.
+fun kolorPilki(numer: i64) -> u32 = {
+    let reszta = numer % 6;
+    var kolor: u32 = grafika.ORANGE;
+    if (reszta == 1) kolor = 0xff6b6bffu32;
+    if (reszta == 2) kolor = 0x4ecdc4ffu32;
+    if (reszta == 3) kolor = 0xffe66dffu32;
+    if (reszta == 4) kolor = 0xa78bfaffu32;
+    if (reszta == 5) kolor = 0x7bd389ffu32;
+    return kolor;
+}
+
+# Prostokąt podany w metrach (lewy dolny i prawy górny róg) narysowany w pikselach.
+fun prostokatWMetrach(s: ref model.Swiat, lewo: f32, dol: f32, prawo: f32, gora: f32, kolor: u32) -> () = {
+    let lg = start.toScreen(&s.sesja, Vec2(lewo, gora)).value;
+    let pd = start.toScreen(&s.sesja, Vec2(prawo, dol)).value;
+    grafika.rectangle(lg.x as i32, lg.y as i32, (pd.x - lg.x) as i32, (pd.y - lg.y) as i32, kolor);
+}
+
+fun rysujPudelko(s: ref model.Swiat) -> () = {
+    let x = model.SCIANA_X;
+    let g = model.GRUBOSC * 2.0;
+    prostokatWMetrach(s, -x - g, -2.0, -x, model.SUFIT_Y + g, SCIANA);   # lewa ściana
+    prostokatWMetrach(s, x, -2.0, x + g, model.SUFIT_Y + g, SCIANA);     # prawa ściana
+    prostokatWMetrach(s, -x - g, model.SUFIT_Y, x + g, model.SUFIT_Y + g, SCIANA);   # sufit
+    prostokatWMetrach(s, -x - g, -2.0, x + g, 0.0, PODLOGA);              # podłoga
+}
+
+fun rysujPilki(s: ref model.Swiat) -> () = {
+    let r = start.sizeToPixels(&s.sesja, Vec2(model.PROMIEN, model.PROMIEN)).value.x;
+    var i: i64 = 0;
+    while (i < model.liczbaPilek(s)) {
+        let p = model.stanPilki(s, i);
+        if (p.status == gra.OK) {
+            let ekran = start.toScreen(&s.sesja, Vec2(p.x, p.y)).value;   # metry -> piksele
+            grafika.circle(ekran.x as i32, ekran.y as i32, r, kolorPilki(i));
+            # Kreska od środka pokazuje obrót piłki (oś Y ekranu rośnie w dół).
+            grafika.line(ekran.x, ekran.y, ekran.x + p.cos * r, ekran.y - p.sin * r, 3.0, TLO);
+        }
+        i += 1;
+    }
+}
+
+# Napisy na pasie podłogi (piksele 500-600): piłki nigdy ich tam nie zasłonią.
+fun rysujNapisy(s: ref model.Swiat, komunikat: str) -> () = {
+    let licznik = f"Pilek: {model.liczbaPilek(s)}";
+    grafika.textDefault(licznik.asSlice(), 34, 512, 20, grafika.WHITE);
+    if (s.grawitacjaWGore) grafika.textDefault("Grawitacja: W GORE", 200, 512, 20, grafika.SKYBLUE);
+    else grafika.textDefault("Grawitacja: w dol", 200, 512, 20, grafika.WHITE);
+    grafika.textDefault("Klik - pilka   G - grawitacja   C - czysc   Esc - wyjscie", 34, 540, 20, grafika.WHITE);
+    if (komunikat.length() > 0) grafika.textDefault(komunikat, 34, 568, 20, grafika.YELLOW);
+}
+
+fun rysujScene(s: ref model.Swiat, komunikat: str) -> () = {
+    rysujPudelko(s);
+    rysujPilki(s);
+    rysujNapisy(s, komunikat);
+}
+
+fun opisStatusu(status: i32) -> str = {
+    if (status == model.POZA_PUDELKIEM) return "Kliknij wewnatrz pudelka, nad podloga";
+    if (status == model.PELNO) return "Za duzo pilek - nacisnij C";
+    return "Fizyka odmowila dodania pilki";
+}
+
+#{
+    Tryb zrzutów do README: PILKI_ZRZUTY=1 ./pilki_fizyka wrzuca piłki według ustalonego
+    planu, symuluje fizykę i zapisuje dwa obrazy do katalogu zrzuty/; potem kończy program.
+#}
+fun zrzutyWlaczone() -> bool = {
+    let wartosc: cptr char = getenv(builtins.ptr_from_slice[char]("PILKI_ZRZUTY\0") as cptr char);
+    return wartosc as u64 != 0u64;
+}
+
+fun zapiszKlatke(s: ref model.Swiat, sciezka: str) -> i32 = {
+    grafika.frameBegin(TLO);
+    rysujScene(s, "");
+    let zapis = grafika.frameSave(sciezka);
+    grafika.frameEnd();
+    return zapis;
+}
+
+fun symuluj(s: ref model.Swiat, klatki: i32) -> () = {
+    var k: i32 = 0;
+    while (k < klatki) { model.krokNs(s, 16666667); k += 1; }
+}
+
+fun zapiszZrzuty() -> i32 = {
+    var s = model.Swiat();
+    if (model.otworz(&s) != gra.OK) return 1;
+    var n: i32 = 0;
+    while (n < 40) {
+        # Piłki wrzucane po kolei z różnych miejsc, co 6 klatek (0,1 s).
+        let px = 120 + ((n * 137) % 560);
+        let py = 80 + ((n * 53) % 140);
+        model.dodajPilke(&s, px as f32, py as f32);
+        symuluj(&s, 6);
+        n += 1;
+    }
+    symuluj(&s, 240);
+    var bledy: i32 = 0;
+    if (zapiszKlatke(&s, "zrzuty/podloga.png") != grafika.OK) bledy += 1;
+    model.odwrocGrawitacje(&s);
+    symuluj(&s, 420);   # 7 s: piłki dolatują do sufitu i przestają się odbijać
+    if (zapiszKlatke(&s, "zrzuty/w-gore.png") != grafika.OK) bledy += 1;
+    model.zamknij(&s);
+    return bledy;
+}
+
+fun main() = {
+    if (grafika.windowOpen(model.SZEROKOSC, model.WYSOKOSC, "Piłki z fizyką") != grafika.OK) {
+        bladNaEkran("Pilki: nie mozna otworzyc okna (brak ekranu albo raylib).\n");
+        return 1;
+    }
+    grafika.setTargetFps(60);
+    if (zrzutyWlaczone()) {
+        let nieZapisane = zapiszZrzuty();
+        grafika.windowClose();
+        if (nieZapisane != 0) {
+            bladNaEkran("Pilki: nie zapisano zrzutow (czy istnieje katalog zrzuty/?).\n");
+            return 1;
+        }
+        return 0;
+    }
+
+    var s = model.Swiat();
+    if (model.otworz(&s) != gra.OK) {
+        grafika.windowClose();
+        bladNaEkran("Pilki: nie mozna utworzyc swiata fizyki.\n");
+        return 1;
+    }
+    var input = grafika.InputState();
+    var komunikat = "";
+    var czasKomunikatu: f32 = 0.0;
+
+    while (not input.closeRequested and not grafika.keyPressed(grafika.KEY_ESCAPE)) {
+        # 1. Wejście: kliknięcie dodaje piłkę w miejscu kursora, G i C zmieniają świat.
+        grafika.inputPoll(&input);
+        let dt = grafika.frameTime();
+        if ((input.mousePressed & grafika.MOUSE_LEFT) != 0) {
+            let dodana = model.dodajPilke(&s, input.mouseX as f32, input.mouseY as f32);
+            if (dodana != gra.OK) {
+                komunikat = opisStatusu(dodana);
+                czasKomunikatu = 2.0;
+            }
+        }
+        if (grafika.keyPressed(grafika.KEY_G)) model.odwrocGrawitacje(&s);
+        if (grafika.keyPressed(grafika.KEY_C)) model.wyczysc(&s);
+
+        # 2. Fizyka: stałe kroki 1/60 s, tyle, ile wynika z czasu klatki.
+        model.krok(&s, dt);
+        if (czasKomunikatu > 0.0) czasKomunikatu -= dt;
+        if (not (czasKomunikatu > 0.0)) komunikat = "";
+
+        # 3. Rysowanie.
+        grafika.frameBegin(TLO);
+        rysujScene(&s, komunikat);
+        grafika.frameEnd();
+    }
+
+    grafika.windowClose();
+    model.zamknij(&s);
+    return 0;
+}

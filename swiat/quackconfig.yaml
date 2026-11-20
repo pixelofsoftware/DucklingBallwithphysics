@@ -1,0 +1,9 @@
+metadata:
+  name: swiat_pilek
+  version: '1.0.0'
+  license: MIT
+  description: Świat gry Piłki z fizyką (podłoga, ściany, piłki) na pakiecie fizyka, bez okna
+dependencies:
+  fizyka:
+    source:
+      path: '../zewnetrzne/fizyka'

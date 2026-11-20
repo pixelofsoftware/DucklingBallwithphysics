@@ -1,0 +1,189 @@
+#{
+    Piłki z fizyką: świat gry (model) na pakiecie fizyka, bez okna.
+
+    Krok 5 tutorialu "Gry 2D w Ducklingu": kliknięcie wrzuca piłkę, piłki spadają,
+    odbijają się i układają na podłodze; ruch i zderzenia liczy fizyka (port Box2D).
+
+    Jednostki: fizyka liczy w metrach z osią Y w górę. 50 pikseli na metr, punkt (0, 0)
+    świata leży w pikselu (400, 500), więc ekran 800x600 to x od -8 do 8 m
+    i y od -2 do 10 m. Wierzch podłogi jest na y = 0 (piksel 500).
+
+    Ten moduł trzyma piłki w pudełku: podłoga z tutorialu, dwie ściany i sufit,
+    żeby po odwróceniu grawitacji piłki nie uciekały z ekranu.
+#}
+import fizyka.start as start;
+import fizyka.gra as gra;
+import fizyka.kola.*;
+
+const SZEROKOSC: i32 = 800;
+const WYSOKOSC: i32 = 600;
+
+const PROMIEN: f32 = 0.4f32;           # promień piłki w metrach (20 pikseli)
+const ODBICIE: f32 = 0.5;              # restitution: 0 = brak, 1 = idealne
+const GRAWITACJA_W_DOL: f32 = -10.0;   # m/s², oś Y w górę
+const GRAWITACJA_W_GORE: f32 = 5.0;    # po odwróceniu (jak na slajdzie "Grawitacja")
+const MAKS_PILEK: i64 = 300;
+
+# Wewnętrzne krawędzie pudełka w metrach.
+const SCIANA_X: f32 = 7.6f32;          # ściany na x = -7.6 i 7.6 (piksele 20 i 780)
+const SUFIT_Y: f32 = 9.6f32;           # sufit na y = 9.6 (piksel 20)
+const GRUBOSC: f32 = 0.5;              # połowa grubości ścian i sufitu
+
+# Najdłuższy czas klatki przekazywany fizyce. Po długiej przerwie (przeciągnięcie okna)
+# fizyka nie nadrabia sekund w przyspieszonym tempie.
+const MAKS_CZAS_KLATKI_NS: i64 = 250000000;
+
+# Statusy własne modułu (fizyka używa małych liczb, np. gra.OK = 0).
+const POZA_PUDELKIEM: i32 = 100;       # kliknięcie poza miejscem na piłkę
+const PELNO: i32 = 101;                # osiągnięto MAKS_PILEK
+
+fun pustaListaCial() -> List[gra.BodyNumber] = {
+    var pusta: List[gra.BodyNumber];
+    return pusta;
+}
+
+class Swiat {
+    sesja: start.GameSession = start.GameSession();
+    pilki: List[gra.BodyNumber] = pustaListaCial();   # numery ciał, żeby potem je narysować
+    grawitacjaWGore: bool = false;
+}
+
+# Stan jednej piłki w metrach: środek, obrót (cos, sin), prędkość, czy nie śpi.
+class StanPilki {
+    status: i32 = gra.STALE;
+    x: f32 = 0.0;
+    y: f32 = 0.0;
+    cos: f32 = 1.0;
+    sin: f32 = 0.0;
+    vx: f32 = 0.0;
+    vy: f32 = 0.0;
+    obudzona: bool = false;
+}
+
+fun scianaStatyczna(swiat: ref Swiat, srodek: Vec2, polowa: Vec2) -> i32 = {
+    var opcje = start.ObjectSettings();
+    opcje.dynamic = false;
+    return start.addBox(&swiat.sesja, srodek, polowa, opcje).status;
+}
+
+# Otwórz świat w swiat (np. swiat.Swiat()): grawitacja w dół, podłoga 20 m x 1 m
+# jak w tutorialu, ściany i sufit. Zwraca gra.OK albo status błędu fizyki.
+fun otworz(swiat: ref Swiat) -> i32 = {
+    swiat.pilki = pustaListaCial();
+    swiat.grawitacjaWGore = false;
+    var ustawienia = start.GameSettings();
+    ustawienia.physics.gravity = Vec2(0.0, GRAWITACJA_W_DOL);
+    var otwarty = start.openGame(ustawienia);
+    if (otwarty.status != gra.OK) return otwarty.status;
+    swiat.sesja = otwarty.session;
+    # Podłoga: nieruchome pudełko 20 m x 1 m (addBox bierze połowy wymiarów).
+    var stan: i32 = scianaStatyczna(swiat, Vec2(0.0, -0.5), Vec2(10.0, 0.5));
+    let wysokoscScian = (SUFIT_Y + 2.0) / 2.0;
+    let srodekScian = SUFIT_Y / 2.0;
+    if (stan == gra.OK) stan = scianaStatyczna(swiat, Vec2(-SCIANA_X - GRUBOSC, srodekScian), Vec2(GRUBOSC, wysokoscScian));
+    if (stan == gra.OK) stan = scianaStatyczna(swiat, Vec2(SCIANA_X + GRUBOSC, srodekScian), Vec2(GRUBOSC, wysokoscScian));
+    if (stan == gra.OK) stan = scianaStatyczna(swiat, Vec2(0.0, SUFIT_Y + GRUBOSC), Vec2(10.0, GRUBOSC));
+    if (stan != gra.OK) start.closeGame(&swiat.sesja);
+    return stan;
+}
+
+fun zamknij(swiat: ref Swiat) -> i32 = {
+    swiat.pilki = pustaListaCial();
+    return start.closeGame(&swiat.sesja);
+}
+
+fun liczbaPilek(swiat: ref Swiat) -> i64 = swiat.pilki.length();
+
+# Czy w punkcie (metry) zmieści się cała piłka, bez nachodzenia na ściany i podłogę.
+fun miejsceNaPilke(punkt: Vec2) -> bool = {
+    return punkt.x >= -SCIANA_X + PROMIEN and punkt.x <= SCIANA_X - PROMIEN
+        and punkt.y >= PROMIEN and punkt.y <= SUFIT_Y - PROMIEN;
+}
+
+# Nowa piłka w punkcie ekranu (piksele). Status gra.OK, POZA_PUDELKIEM, PELNO albo błąd fizyki.
+fun dodajPilke(swiat: ref Swiat, px: f32, py: f32) -> i32 = {
+    if (swiat.pilki.length() >= MAKS_PILEK) return PELNO;
+    let miejsce = start.toWorld(&swiat.sesja, Vec2(px, py));    # piksele -> metry
+    if (miejsce.status != gra.OK) return miejsce.status;
+    if (not miejsceNaPilke(miejsce.value)) return POZA_PUDELKIEM;
+    var opcje = start.ObjectSettings();
+    opcje.restitution = ODBICIE;
+    let nowa = start.addBall(&swiat.sesja, miejsce.value, PROMIEN, opcje);
+    if (nowa.status == gra.OK) swiat.pilki.push(nowa.body.number);
+    return nowa.status;
+}
+
+# Posuń fizykę o czas w nanosekundach: tyle stałych kroków (1/60 s), ile z niego wynika.
+fun krokNs(swiat: ref Swiat, nanosekundy: i64) -> i32 = {
+    var czas: i64 = nanosekundy;
+    if (czas < 0) czas = 0;
+    if (czas > MAKS_CZAS_KLATKI_NS) czas = MAKS_CZAS_KLATKI_NS;
+    let budzet = start.queueTime(&swiat.sesja, czas);
+    if (budzet.status != gra.OK) return budzet.status;
+    var wykonane: i32 = 0;
+    var blad: i32 = gra.OK;
+    while (wykonane < budzet.steps and blad == gra.OK) {
+        blad = start.tick(&swiat.sesja).status;
+        wykonane += 1;
+    }
+    return blad;
+}
+
+# To samo dla czasu klatki w sekundach (grafika.frameTime()).
+fun krok(swiat: ref Swiat, sekundy: f32) -> i32 = {
+    if (not (sekundy > 0.0)) return krokNs(swiat, 0);   # także NaN
+    var s: f32 = sekundy;
+    if (s > 1.0) s = 1.0;
+    return krokNs(swiat, (s * 1000000000.0) as i64);
+}
+
+# Ustaw grawitację i obudź wszystkie piłki: Box2D nie budzi śpiących ciał po zmianie
+# grawitacji, więc leżące piłki zostałyby na podłodze.
+fun ustawGrawitacje(swiat: ref Swiat, gx: f32, gy: f32) -> i32 = {
+    var stan: i32 = gra.setGravity(swiat.sesja.world, Vec2(gx, gy));
+    var i: i64 = 0;
+    while (i < swiat.pilki.length() and stan == gra.OK) {
+        stan = gra.setAwake(swiat.sesja.world, swiat.pilki.at(i), true);
+        i += 1;
+    }
+    return stan;
+}
+
+# Pomysł z tutorialu: klawisz, który odwraca grawitację.
+fun odwrocGrawitacje(swiat: ref Swiat) -> i32 = {
+    var stan: i32 = gra.OK;
+    if (swiat.grawitacjaWGore) stan = ustawGrawitacje(swiat, 0.0, GRAWITACJA_W_DOL);
+    else stan = ustawGrawitacje(swiat, 0.0, GRAWITACJA_W_GORE);
+    if (stan == gra.OK) swiat.grawitacjaWGore = not swiat.grawitacjaWGore;
+    return stan;
+}
+
+# Usuń wszystkie piłki.
+fun wyczysc(swiat: ref Swiat) -> i32 = {
+    var stan: i32 = gra.OK;
+    var i: i64 = 0;
+    while (i < swiat.pilki.length()) {
+        let usunieta = gra.destroyBody(swiat.sesja.world, swiat.pilki.at(i));
+        if (usunieta != gra.OK) stan = usunieta;
+        i += 1;
+    }
+    swiat.pilki = pustaListaCial();
+    return stan;
+}
+
+# Aktualny stan i-tej piłki (gra.lookupBody), w metrach.
+fun stanPilki(swiat: ref Swiat, i: i64) -> StanPilki = {
+    var wynik = StanPilki();
+    if (i < 0 or i >= swiat.pilki.length()) { wynik.status = gra.PARAM; return wynik; }
+    let cialo = gra.lookupBody(swiat.sesja.world, swiat.pilki.at(i));
+    wynik.status = cialo.status;
+    if (cialo.status != gra.OK) return wynik;
+    wynik.x = cialo.value.transform.p.x;
+    wynik.y = cialo.value.transform.p.y;
+    wynik.cos = cialo.value.transform.q.c;
+    wynik.sin = cialo.value.transform.q.s;
+    wynik.vx = cialo.value.linearVelocity.x;
+    wynik.vy = cialo.value.linearVelocity.y;
+    wynik.obudzona = cialo.value.isAwake;
+    return wynik;
+}

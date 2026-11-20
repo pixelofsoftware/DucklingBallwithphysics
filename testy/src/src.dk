@@ -1,0 +1,184 @@
+#{
+    Testy świata piłek (fizyka bez okna): `duck run` w katalogu testy/.
+    Kod wyjścia to liczba nieudanych sprawdzeń (0 = wszystko w porządku).
+#}
+import swiat_pilek as model;
+import fizyka.gra as gra;
+
+const KLATKA_60: i64 = 16666667;   # nanosekundy jednej klatki przy 60 fps
+
+var nieudane: i32 = 0;
+var wszystkie: i32 = 0;
+
+fun sprawdz(warunek: bool, opis: str) -> () = {
+    wszystkie += 1;
+    if (warunek) {
+        print(f"  OK    {opis}\n".asSlice());
+    } else {
+        nieudane += 1;
+        print(f"  BLAD  {opis}\n".asSlice());
+    }
+}
+
+fun blisko(a: f32, b: f32, tolerancja: f32) -> bool = {
+    let roznica = a - b;
+    return roznica <= tolerancja and roznica >= -tolerancja;
+}
+
+fun symuluj(s: ref model.Swiat, klatki: i32, nanosekundy: i64) -> bool = {
+    var dobrze = true;
+    var k: i32 = 0;
+    while (k < klatki) {
+        if (model.krokNs(s, nanosekundy) != gra.OK) dobrze = false;
+        k += 1;
+    }
+    return dobrze;
+}
+
+fun testOtwarcia() -> () = {
+    print("Swiat\n");
+    var s = model.Swiat();
+    sprawdz(model.otworz(&s) == gra.OK, "swiat sie otwiera (podloga, sciany, sufit)");
+    sprawdz(model.liczbaPilek(&s) == 0, "na poczatku nie ma pilek");
+    sprawdz(model.zamknij(&s) == gra.OK, "swiat sie zamyka");
+}
+
+fun testDodawania() -> () = {
+    print("Dodawanie pilek kliknieciem\n");
+    var s = model.Swiat();
+    model.otworz(&s);
+    sprawdz(model.dodajPilke(&s, 400.0, 100.0) == gra.OK, "klik w (400, 100) dodaje pilke");
+    let p = model.stanPilki(&s, 0);
+    sprawdz(p.status == gra.OK and blisko(p.x, 0.0, 0.001f32) and blisko(p.y, 8.0, 0.001f32),
+        "piksel (400, 100) to punkt (0 m, 8 m) swiata");
+    sprawdz(model.dodajPilke(&s, 5.0, 300.0) == model.POZA_PUDELKIEM, "klik w lewa sciane jest odrzucony");
+    sprawdz(model.dodajPilke(&s, 400.0, 550.0) == model.POZA_PUDELKIEM, "klik pod podloga jest odrzucony");
+    sprawdz(model.dodajPilke(&s, 400.0, 5.0) == model.POZA_PUDELKIEM, "klik w sufit jest odrzucony");
+    sprawdz(model.dodajPilke(&s, 400.0, 485.0) == model.POZA_PUDELKIEM, "pilka nachodzaca na podloge jest odrzucona");
+    sprawdz(model.liczbaPilek(&s) == 1, "odrzucone klikniecia nie dodaja pilek");
+    sprawdz(model.stanPilki(&s, 5).status != gra.OK, "stan nieistniejacej pilki to blad, nie zle dane");
+    model.zamknij(&s);
+}
+
+fun testSpadania() -> () = {
+    print("Spadanie, odbicie i lezenie na podlodze\n");
+    var s = model.Swiat();
+    model.otworz(&s);
+    model.dodajPilke(&s, 400.0, 100.0);   # 8 m nad podloga
+    var dotknela = false;
+    var najwyzejPoOdbiciu: f32 = 0.0;
+    var k: i32 = 0;
+    while (k < 240) {
+        model.krokNs(&s, KLATKA_60);
+        let p = model.stanPilki(&s, 0);
+        if (p.y < 0.45f32) dotknela = true;
+        if (dotknela and p.y > najwyzejPoOdbiciu) najwyzejPoOdbiciu = p.y;
+        k += 1;
+    }
+    sprawdz(dotknela, "pilka spada na podloge");
+    # Odbicie 0.5: prędkość po odbiciu jest o połowę mniejsza, wysokość około 1/4.
+    sprawdz(najwyzejPoOdbiciu > 1.0 and najwyzejPoOdbiciu < 4.0,
+        "pilka odbija sie (restitution 0.5): wraca na ok. 1/4 wysokosci");
+    let lezy = model.stanPilki(&s, 0);
+    sprawdz(blisko(lezy.y, model.PROMIEN, 0.02f32), "po 4 s pilka lezy na podlodze (srodek na wysokosci promienia)");
+    sprawdz(blisko(lezy.vx, 0.0, 0.01f32) and blisko(lezy.vy, 0.0, 0.01f32), "lezaca pilka sie nie porusza");
+    sprawdz(blisko(lezy.x, 0.0, 0.001f32), "pilka spadajaca pionowo nie zbacza na boki");
+    model.zamknij(&s);
+}
+
+fun testKrokuStalego() -> () = {
+    print("Staly krok fizyki niezalezny od liczby klatek\n");
+    var wolno = model.Swiat();
+    var szybko = model.Swiat();
+    model.otworz(&wolno);
+    model.otworz(&szybko);
+    model.dodajPilke(&wolno, 300.0, 150.0);
+    model.dodajPilke(&szybko, 300.0, 150.0);
+    let ok30 = symuluj(&wolno, 60, 33333333);    # 2 s przy 30 fps
+    let ok144 = symuluj(&szybko, 288, 6944444);  # 2 s przy 144 fps
+    let a = model.stanPilki(&wolno, 0);
+    let b = model.stanPilki(&szybko, 0);
+    sprawdz(ok30 and ok144, "krok fizyki dziala przy 30 i 144 fps");
+    sprawdz(blisko(a.x, b.x, 0.0001f32) and blisko(a.y, b.y, 0.0001f32),
+        "po 2 s pilka jest w tym samym miejscu przy 30 i 144 fps");
+    sprawdz(model.krokNs(&wolno, -5) == gra.OK, "ujemny czas klatki jest ignorowany");
+    let krokiPrzed = wolno.sesja.stepIndex;
+    model.krokNs(&wolno, 10000000000);   # 10 s przerwy: fizyka nie nadrabia wszystkiego naraz
+    let krokiPo = wolno.sesja.stepIndex;
+    sprawdz(krokiPo - krokiPrzed <= 15, "10 s przerwy daje najwyzej 0,25 s fizyki (bez przewijania)");
+    model.krokNs(&wolno, KLATKA_60);
+    sprawdz(wolno.sesja.stepIndex - krokiPo <= 8, "po przerwie fizyka nie nadrabia zaleglych sekund");
+    model.zamknij(&wolno);
+    model.zamknij(&szybko);
+}
+
+fun testGrawitacji() -> () = {
+    print("Odwracanie grawitacji\n");
+    var s = model.Swiat();
+    model.otworz(&s);
+    model.dodajPilke(&s, 400.0, 400.0);
+    symuluj(&s, 240, KLATKA_60);
+    sprawdz(not model.stanPilki(&s, 0).obudzona, "lezaca pilka zasypia (fizyka ja usypia)");
+    sprawdz(model.odwrocGrawitacje(&s) == gra.OK and s.grawitacjaWGore, "G: grawitacja w gore");
+    symuluj(&s, 60, KLATKA_60);
+    sprawdz(model.stanPilki(&s, 0).y > 2.0, "po 1 s uspiona pilka jest juz wysoko (zostala obudzona)");
+    symuluj(&s, 540, KLATKA_60);   # razem 10 s: odbicia od sufitu przy 5 m/s² trwaja ok. 5 s
+    let gora = model.stanPilki(&s, 0);
+    let opisGory = f"pilka lezy pod sufitem (y = {gora.y} m, oczekiwane 9.2)";
+    sprawdz(blisko(gora.y, model.SUFIT_Y - model.PROMIEN, 0.03f32), opisGory.asSlice());
+    model.odwrocGrawitacje(&s);
+    symuluj(&s, 600, KLATKA_60);
+    sprawdz(not s.grawitacjaWGore and blisko(model.stanPilki(&s, 0).y, model.PROMIEN, 0.03f32),
+        "drugie G: pilka wraca na podloge");
+    model.ustawGrawitacje(&s, 10.0, 0.0);
+    symuluj(&s, 300, KLATKA_60);
+    sprawdz(blisko(model.stanPilki(&s, 0).x, model.SCIANA_X - model.PROMIEN, 0.03f32),
+        "grawitacja w bok: pilka zatrzymuje sie na scianie, nie wylatuje z ekranu");
+    model.zamknij(&s);
+}
+
+fun testWielu() -> () = {
+    print("Wiele pilek i czyszczenie\n");
+    var s = model.Swiat();
+    model.otworz(&s);
+    var n: i32 = 0;
+    while (n < 30) {
+        model.dodajPilke(&s, (300 + (n % 5) * 45) as f32, (100 + (n / 5) * 45) as f32);
+        n += 1;
+    }
+    sprawdz(model.liczbaPilek(&s) == 30, "30 pilek w swiecie");
+    symuluj(&s, 360, KLATKA_60);
+    var wPudelku = true;
+    var najszybsza: f32 = 0.0;
+    var i: i64 = 0;
+    while (i < model.liczbaPilek(&s)) {
+        let p = model.stanPilki(&s, i);
+        if (p.x < -model.SCIANA_X or p.x > model.SCIANA_X or p.y < 0.0 or p.y > model.SUFIT_Y) wPudelku = false;
+        let szybkosc = p.vx * p.vx + p.vy * p.vy;
+        if (szybkosc > najszybsza) najszybsza = szybkosc;
+        i += 1;
+    }
+    sprawdz(wPudelku, "po 6 s wszystkie pilki sa w pudelku (nic nie przenika przez sciany)");
+    let opisStosu = f"po 6 s wszystkie pilki sie zatrzymaly (najwiekszy kwadrat predkosci {najszybsza})";
+    sprawdz(najszybsza < 0.01f32, opisStosu.asSlice());
+    sprawdz(model.wyczysc(&s) == gra.OK and model.liczbaPilek(&s) == 0, "C: wszystkie pilki usuniete");
+    sprawdz(model.dodajPilke(&s, 400.0, 100.0) == gra.OK, "po czyszczeniu mozna dodawac dalej");
+    model.wyczysc(&s);
+    var m: i64 = 0;
+    while (m < model.MAKS_PILEK) { model.dodajPilke(&s, 400.0, 100.0); m += 1; }
+    sprawdz(model.liczbaPilek(&s) == model.MAKS_PILEK and model.dodajPilke(&s, 400.0, 100.0) == model.PELNO,
+        "limit pilek: kolejna pilka dostaje PELNO");
+    model.zamknij(&s);
+}
+
+fun main() -> i64 = {
+    print("Testy swiata: Pilki z fizyka\n");
+    testOtwarcia();
+    testDodawania();
+    testSpadania();
+    testKrokuStalego();
+    testGrawitacji();
+    testWielu();
+    print(f"Wynik: {wszystkie - nieudane}/{wszystkie} sprawdzen udanych\n".asSlice());
+    return nieudane as i64;
+}
