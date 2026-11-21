@@ -1,0 +1,7 @@
+#{
+    fizyka: fizyka gier 2D, port Box2D 3.1.1.
+
+    Pierwszy program zaczyna się od `fizyka.start`, dodatkowe operacje są w `fizyka.gra`.
+    Niższe warstwy: `fizyka.kola`, `fizyka.wielokaty`, `fizyka.ruch`, `fizyka.drzewo`,
+    `fizyka.zbior`, `fizyka.szeroka` i `fizyka.swiat`.
+#}

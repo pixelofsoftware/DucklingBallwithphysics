@@ -1,0 +1,383 @@
+#{
+SPDX-FileCopyrightText: 2023 Erin Catto
+SPDX-License-Identifier: MIT
+
+MIT License
+
+Copyright (c) 2022 Erin Catto
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+#}
+
+# Box2D 8c661469, types.h:1383-1464; world.c:814-1489; joint draw functions. MIT.
+# Owned command stream. No window, GPU, or C physics. API lives here while gra.dk has another writer.
+import fizyka.kola.*;
+import fizyka.swiat as raw;
+import fizyka.gra as game;
+import fizyka.drzewo as tree;
+import fizyka.ruch as motion;
+import fizyka.odleglosc as distance;
+import std.math;
+import fizyka.wielokaty as poly;
+import fizyka.zbior.*;
+import core.clib as clib;
+import core.builtins as builtins;
+extern("C") {
+    @cffi_variadic_fixed_params(3)
+    fundecl snprintf(s: cptr char,n: u64,format: cptr char,value: i32) -> i32;
+}
+fun words() -> List[u32] = { var v: List[u32]; return v; }
+fun bytes() -> List[u8] = { var v: List[u8]; return v; }
+class DrawCommand { kind: i32 = 0i32; payload: List[u32] = words(); text: List[u8] = bytes(); }
+fun emptyDrawCommands() -> List[DrawCommand] = { var v: List[DrawCommand]; return v; }
+class DrawSnapshot { commands: List[DrawCommand] = emptyDrawCommands(); contextToken: Key64 = Key64(); }
+class DrawSettings {
+    useDrawingBounds: bool = false;
+    drawShapes: bool = false;
+    drawJoints: bool = false;
+    drawJointExtras: bool = false;
+    drawBounds: bool = false;
+    drawMass: bool = false;
+    drawBodyNames: bool = false;
+    drawContacts: bool = false;
+    drawGraphColors: bool = false;
+    drawContactNormals: bool = false;
+    drawContactImpulses: bool = false;
+    drawContactFeatures: bool = false;
+    drawFrictionImpulses: bool = false;
+    drawIslands: bool = false;
+    drawingBounds: tree.AABB = tree.AABB(); contextToken: Key64 = Key64();
+}
+class DrawValidation { status: i32 = 0i32; reason: i32 = 0i32; }
+class DrawResult { status: i32 = 0i32; reason: i32 = 0i32; value: DrawSnapshot = DrawSnapshot(); }
+fun emptyPolygon(p: ref Vec2[8],n: i32,color: u32,ctx: ref DrawSnapshot) -> () = { }
+fun emptySolidPolygon(x: Transform,p: ref Vec2[8],n: i32,r: f32,color: u32,ctx: ref DrawSnapshot) -> () = { }
+fun emptyCircle(p: Vec2,r: f32,color: u32,ctx: ref DrawSnapshot) -> () = { }
+fun emptySolidCircle(x: Transform,r: f32,color: u32,ctx: ref DrawSnapshot) -> () = { }
+fun emptySolidCapsule(a: Vec2,b: Vec2,r: f32,color: u32,ctx: ref DrawSnapshot) -> () = { }
+fun emptySegment(a: Vec2,b: Vec2,color: u32,ctx: ref DrawSnapshot) -> () = { }
+fun emptyTransform(x: Transform,ctx: ref DrawSnapshot) -> () = { }
+fun emptyPoint(p: Vec2,size: f32,color: u32,ctx: ref DrawSnapshot) -> () = { }
+fun emptyString(p: Vec2,s: cptr char,color: u32,ctx: ref DrawSnapshot) -> () = { }
+class DebugDraw {
+    settings: DrawSettings = DrawSettings();
+    DrawPolygonFcn: funptr(ref Vec2[8],i32,u32,ref DrawSnapshot) -> () = emptyPolygon;
+    DrawSolidPolygonFcn: funptr(Transform,ref Vec2[8],i32,f32,u32,ref DrawSnapshot) -> () = emptySolidPolygon;
+    DrawCircleFcn: funptr(Vec2,f32,u32,ref DrawSnapshot) -> () = emptyCircle;
+    DrawSolidCircleFcn: funptr(Transform,f32,u32,ref DrawSnapshot) -> () = emptySolidCircle;
+    DrawSolidCapsuleFcn: funptr(Vec2,Vec2,f32,u32,ref DrawSnapshot) -> () = emptySolidCapsule;
+    DrawSegmentFcn: funptr(Vec2,Vec2,u32,ref DrawSnapshot) -> () = emptySegment;
+    DrawTransformFcn: funptr(Transform,ref DrawSnapshot) -> () = emptyTransform;
+    DrawPointFcn: funptr(Vec2,f32,u32,ref DrawSnapshot) -> () = emptyPoint;
+    DrawStringFcn: funptr(Vec2,cptr char,u32,ref DrawSnapshot) -> () = emptyString;
+}
+fun defaultDebugDraw() -> DebugDraw = { return DebugDraw(); }
+fun bits(x: f32) -> u32 = { var v: f32 = x; return (&v as cptr u32)[0]; }
+fun appendVector(c: ref DrawCommand,p: Vec2) -> () = { c.payload.push(bits(p.x)); c.payload.push(bits(p.y)); }
+fun appendTransform(c: ref DrawCommand,x: Transform) -> () = { appendVector(c,x.p);c.payload.push(bits(x.q.c));c.payload.push(bits(x.q.s)); }
+fun save(c: DrawCommand,context: ref DrawSnapshot) -> () = { context.commands.push(move c); }
+fun polygon(p: ref Vec2[8],n: i32,color: u32,ctx: ref DrawSnapshot) -> () = {
+    var c = DrawCommand(0i32);c.payload.push(n as u32);c.payload.push(color);
+    var i: i32 = 0i32;while(i<n){appendVector(&c,p[i]);i += 1i32;}save(move c,ctx);
+}
+fun solidPolygon(x: Transform,p: ref Vec2[8],n: i32,r: f32,color: u32,ctx: ref DrawSnapshot) -> () = {
+    var c = DrawCommand(1i32);appendTransform(&c,x);c.payload.push(n as u32);c.payload.push(bits(r));c.payload.push(color);
+    var i: i32 = 0i32;while(i<n){appendVector(&c,p[i]);i += 1i32;}save(move c,ctx);
+}
+fun circle(p: Vec2,r: f32,color: u32,ctx: ref DrawSnapshot) -> () = {var c = DrawCommand(2i32);appendVector(&c,p);c.payload.push(bits(r));c.payload.push(color);save(move c,ctx);}
+fun solidCircle(x: Transform,r: f32,color: u32,ctx: ref DrawSnapshot) -> () = {var c = DrawCommand(3i32);appendTransform(&c,x);c.payload.push(bits(r));c.payload.push(color);save(move c,ctx);}
+fun capsule(a: Vec2,b: Vec2,r: f32,color: u32,ctx: ref DrawSnapshot) -> () = {var c = DrawCommand(4i32);appendVector(&c,a);appendVector(&c,b);c.payload.push(bits(r));c.payload.push(color);save(move c,ctx);}
+fun segment(a: Vec2,b: Vec2,color: u32,ctx: ref DrawSnapshot) -> () = {var c = DrawCommand(5i32);appendVector(&c,a);appendVector(&c,b);c.payload.push(color);save(move c,ctx);}
+fun transform(x: Transform,ctx: ref DrawSnapshot) -> () = {var c = DrawCommand(6i32);appendTransform(&c,x);save(move c,ctx);}
+fun point(p: Vec2,size: f32,color: u32,ctx: ref DrawSnapshot) -> () = {var c = DrawCommand(7i32);appendVector(&c,p);c.payload.push(bits(size));c.payload.push(color);save(move c,ctx);}
+fun text(p: Vec2,s: cptr char,color: u32,ctx: ref DrawSnapshot) -> () = {
+    var c = DrawCommand(8i32);appendVector(&c,p);c.payload.push(color);var i: i64 = 0i64;
+    while(s[i] as u8 != 0u8){c.text.push(s[i] as u8);i += 1i64;}save(move c,ctx);
+}
+fun collector(settings: DrawSettings,mask: u32) -> DebugDraw = {
+    var d = defaultDebugDraw(); d.settings = settings;
+    if ((mask & 1u32) != 0u32) d.DrawPolygonFcn = polygon;
+    if ((mask & 2u32) != 0u32) d.DrawSolidPolygonFcn = solidPolygon;
+    if ((mask & 4u32) != 0u32) d.DrawCircleFcn = circle;
+    if ((mask & 8u32) != 0u32) d.DrawSolidCircleFcn = solidCircle;
+    if ((mask & 16u32) != 0u32) d.DrawSolidCapsuleFcn = capsule;
+    if ((mask & 32u32) != 0u32) d.DrawSegmentFcn = segment;
+    if ((mask & 64u32) != 0u32) d.DrawTransformFcn = transform;
+    if ((mask & 128u32) != 0u32) d.DrawPointFcn = point;
+    if ((mask & 256u32) != 0u32) d.DrawStringFcn = text;
+    return d;
+}
+fun validateDrawSettings(owner: game.WorldNumber,settings: DrawSettings) -> DrawValidation = {
+    let status: i32 = game.worldStatus(owner); if(status != game.OK)return DrawValidation(status,0i32);
+    if(raw.worlds.at(owner.slot as i64).locked)return DrawValidation(game.LOCKED,1i32);
+    if(settings.useDrawingBounds){
+        let a: tree.AABB = settings.drawingBounds;
+        if(not game.finite(a.lowerBound.x) or not game.finite(a.lowerBound.y) or not game.finite(a.upperBound.x) or not game.finite(a.upperBound.y) or a.lowerBound.x>a.upperBound.x or a.lowerBound.y>a.upperBound.y)return DrawValidation(game.PARAM,26i32);
+    }
+    return DrawValidation();
+}
+fun drawSnapshot(owner: game.WorldNumber,settings: DrawSettings) -> DrawResult = {
+    let check: DrawValidation = validateDrawSettings(owner,settings);
+    if(check.status != 0i32)return DrawResult(check.status,check.reason,DrawSnapshot());
+    var result = DrawSnapshot();result.contextToken = settings.contextToken;
+    var d = collector(settings,511u32);worldDraw(raw.WorldId((owner.slot+1i32) as u16,raw.worlds.at(owner.slot as i64).generation),&d,&result);
+    return DrawResult(0i32,0i32,move result);
+}
+
+const Red: u32 = 16711680u32;
+const Orange: u32 = 16753920u32;
+const Yellow: u32 = 16776960u32;
+const Green: u32 = 32768u32;
+const Cyan: u32 = 65535u32;
+const Blue: u32 = 255u32;
+const Violet: u32 = 15631086u32;
+const Pink: u32 = 16761035u32;
+const Chocolate: u32 = 13789470u32;
+const GoldenRod: u32 = 14329120u32;
+const Coral: u32 = 16744272u32;
+const Black: u32 = 0u32;
+const Gold: u32 = 16766720u32;
+const PaleGreen: u32 = 10025880u32;
+const White: u32 = 16777215u32;
+const Gray: u32 = 8421504u32;
+const SlateGray: u32 = 7372944u32;
+const Turquoise: u32 = 4251856u32;
+const Salmon: u32 = 16416882u32;
+const RoyalBlue: u32 = 4286945u32;
+const Wheat: u32 = 16113331u32;
+const DarkSeaGreen: u32 = 9419919u32;
+const BlueViolet: u32 = 9055202u32;
+const OrangeRed: u32 = 16729344u32;
+const LightGray: u32 = 13882323u32;
+const Gainsboro: u32 = 14474460u32;
+const DimGray: u32 = 6908265u32;
+const Magenta: u32 = 16711935u32;
+const LightGreen: u32 = 9498256u32;
+fun graphColor(index: i32) -> u32 = {
+    var palette: u32[12];palette[0] = Red;palette[1] = Orange;palette[2] = Yellow;palette[3] = Green;palette[4] = Cyan;palette[5] = Blue;palette[6] = Violet;palette[7] = Pink;palette[8] = Chocolate;palette[9] = GoldenRod;palette[10] = Coral;palette[11] = Black;return palette[index];
+}
+# world.c:814-871. Active vertices copied by the sink before callback return.
+fun drawShape(d: ref DebugDraw,shape: ref raw.ShapeRecord,xf: Transform,color: u32,ctx: ref DrawSnapshot) -> () = {
+    if(shape.shapeType == 0i32){var circleXf: Transform = xf;circleXf.p = b2TransformPoint(xf,shape.circle.center);d.DrawSolidCircleFcn(circleXf,shape.circle.radius,color,ctx);}
+    else if(shape.shapeType == 1i32)d.DrawSolidCapsuleFcn(b2TransformPoint(xf,shape.capsule.center1),b2TransformPoint(xf,shape.capsule.center2),shape.capsule.radius,color,ctx);
+    else if(shape.shapeType == 2i32)d.DrawSegmentFcn(b2TransformPoint(xf,shape.segment.point1),b2TransformPoint(xf,shape.segment.point2),color,ctx);
+    else if(shape.shapeType == 3i32)d.DrawSolidPolygonFcn(xf,&shape.polygon.vertices,shape.polygon.count,shape.polygon.radius,color,ctx);
+    else if(shape.shapeType == 4i32){
+        let p1: Vec2 = b2TransformPoint(xf,shape.chainSegment.segment.point1);let p2: Vec2 = b2TransformPoint(xf,shape.chainSegment.segment.point2);
+        d.DrawSegmentFcn(p1,p2,color,ctx);d.DrawPointFcn(p2,4.0f32,color,ctx);d.DrawSegmentFcn(p1,b2Lerp(p1,p2,0.1f32),PaleGreen,ctx);
+    }
+}
+fun shapeColor(body: ref raw.BodyRecord,sim: ref raw.BodySim,shape: ref raw.ShapeRecord) -> u32 = {
+    if(shape.customColor != 0u32)return shape.customColor;
+    if(body.bodyType == 2i32 and body.mass == 0.0f32)return Red;
+    if(body.setIndex == 1i32)return SlateGray;
+    if(shape.sensorIndex != -1i32)return Wheat;
+    if(sim.isBullet and body.setIndex == 2i32)return Turquoise;
+    if(body.isSpeedCapped)return Yellow;
+    if(sim.isFast)return Salmon;
+    if(body.bodyType == 0i32)return PaleGreen;
+    if(body.bodyType == 1i32)return RoyalBlue;
+    if(body.setIndex == 2i32)return Pink;
+    return Gray;
+}
+fun drawAABB(d: ref DebugDraw,a: tree.AABB,color: u32,ctx: ref DrawSnapshot) -> () = {
+    var vs: Vec2[8];vs[0] = a.lowerBound;vs[1] = Vec2(a.upperBound.x,a.lowerBound.y);vs[2] = a.upperBound;vs[3] = Vec2(a.lowerBound.x,a.upperBound.y);
+    d.DrawPolygonFcn(&vs,4i32,color,ctx);
+}
+# Standard C formatting only; f32 operations happen before promotion to f64.
+fun drawNumber(d: ref DebugDraw,p: Vec2,fmt: str,value: f32,color: u32,ctx: ref DrawSnapshot) -> () = {
+    var buffer: char[32];clib.snprintf(&buffer[0] as cptr char,32u64,builtins.ptr_from_slice[char](fmt) as cptr char,value as f64);
+    d.DrawStringFcn(p,&buffer[0] as cptr char,color,ctx);
+}
+fun drawInteger(d: ref DebugDraw,p: Vec2,value: i32,color: u32,ctx: ref DrawSnapshot) -> () = {
+    var buffer: char[32];snprintf(&buffer[0] as cptr char,32u64,builtins.ptr_from_slice[char]("%d\0") as cptr char,value);
+    d.DrawStringFcn(p,&buffer[0] as cptr char,color,ctx);
+}
+fun drawDistanceJoint(d: ref DebugDraw,base: ref raw.JointSim,xfA: Transform,xfB: Transform,ctx: ref DrawSnapshot) -> () = {
+    var joint: ref raw.DistanceJoint = &base.distanceJoint;
+    let pA: Vec2 = b2TransformPoint(xfA,base.localOriginAnchorA);let pB: Vec2 = b2TransformPoint(xfB,base.localOriginAnchorB);
+    let axis: Vec2 = motion.b2Normalize(b2Sub(pB,pA));
+    if(joint.minLength<joint.maxLength and joint.enableLimit){
+        let pMin: Vec2 = b2MulAdd(pA,joint.minLength,axis);let pMax: Vec2 = b2MulAdd(pA,joint.maxLength,axis);let offset: Vec2 = motion.b2MulSV(0.05f32*b2_lengthUnitsPerMeter,b2RightPerp(axis));
+        if(joint.minLength>B2_LINEAR_SLOP)d.DrawSegmentFcn(b2Sub(pMin,offset),b2Add(pMin,offset),LightGreen,ctx);
+        if(joint.maxLength<B2_HUGE)d.DrawSegmentFcn(b2Sub(pMax,offset),b2Add(pMax,offset),Red,ctx);
+        if(joint.minLength>B2_LINEAR_SLOP and joint.maxLength<B2_HUGE)d.DrawSegmentFcn(pMin,pMax,Gray,ctx);
+    }
+    d.DrawSegmentFcn(pA,pB,White,ctx);d.DrawPointFcn(pA,4.0f32,White,ctx);d.DrawPointFcn(pB,4.0f32,White,ctx);
+    if(joint.hertz>0.0f32 and joint.enableSpring)d.DrawPointFcn(b2MulAdd(pA,joint.length,axis),4.0f32,Blue,ctx);
+}
+fun drawPrismaticJoint(d: ref DebugDraw,base: ref raw.JointSim,xfA: Transform,xfB: Transform,ctx: ref DrawSnapshot) -> () = {
+    var joint: ref raw.PrismaticJoint = &base.prismaticJoint;
+    let pA: Vec2 = b2TransformPoint(xfA,base.localOriginAnchorA);let pB: Vec2 = b2TransformPoint(xfB,base.localOriginAnchorB);let axis: Vec2 = b2RotateVector(xfA.q,joint.localAxisA);
+    d.DrawSegmentFcn(pA,pB,DimGray,ctx);
+    if(joint.enableLimit){
+        let lower: Vec2 = b2MulAdd(pA,joint.lowerTranslation,axis);let upper: Vec2 = b2MulAdd(pA,joint.upperTranslation,axis);let perp: Vec2 = b2LeftPerp(axis);
+        d.DrawSegmentFcn(lower,upper,Gray,ctx);d.DrawSegmentFcn(distance.b2MulSub(lower,0.1f32,perp),b2MulAdd(lower,0.1f32,perp),Green,ctx);d.DrawSegmentFcn(distance.b2MulSub(upper,0.1f32,perp),b2MulAdd(upper,0.1f32,perp),Red,ctx);
+    }else d.DrawSegmentFcn(distance.b2MulSub(pA,1.0f32,axis),b2MulAdd(pA,1.0f32,axis),Gray,ctx);
+    d.DrawPointFcn(pA,5.0f32,Gray,ctx);d.DrawPointFcn(pB,5.0f32,Blue,ctx);
+}
+fun drawRevoluteJoint(d: ref DebugDraw,base: ref raw.JointSim,xfA: Transform,xfB: Transform,size: f32,ctx: ref DrawSnapshot) -> () = {
+    var joint: ref raw.RevoluteJoint = &base.revoluteJoint;
+    let pA: Vec2 = b2TransformPoint(xfA,base.localOriginAnchorA);let pB: Vec2 = b2TransformPoint(xfB,base.localOriginAnchorB);
+    d.DrawCircleFcn(pB,size,Gray,ctx);let angle: f32 = raw.b2RelativeAngle(xfB.q,xfA.q);let rot: Rot = makeRot(angle);let pC: Vec2 = b2Add(pB,Vec2(size*rot.c,size*rot.s));d.DrawSegmentFcn(pB,pC,Gray,ctx);
+    if(d.settings.drawJointExtras)drawNumber(d,pC," %.1f deg\0",180.0f32*raw.b2UnwindAngle(angle-joint.referenceAngle)/motion.B2_PI,White,ctx);
+    let lowerAngle: f32 = joint.lowerAngle+joint.referenceAngle;let upperAngle: f32 = joint.upperAngle+joint.referenceAngle;
+    if(joint.enableLimit){
+        let lo: Rot = makeRot(lowerAngle);let hi: Rot = makeRot(upperAngle);let reference: Rot = makeRot(joint.referenceAngle);
+        d.DrawSegmentFcn(pB,b2Add(pB,Vec2(size*lo.c,size*lo.s)),Green,ctx);d.DrawSegmentFcn(pB,b2Add(pB,Vec2(size*hi.c,size*hi.s)),Red,ctx);d.DrawSegmentFcn(pB,b2Add(pB,Vec2(size*reference.c,size*reference.s)),Blue,ctx);
+    }
+    d.DrawSegmentFcn(xfA.p,pA,Gold,ctx);d.DrawSegmentFcn(pA,pB,Gold,ctx);d.DrawSegmentFcn(xfB.p,pB,Gold,ctx);
+}
+# wheel_joint.c b2DrawWheelJoint, actual typed simulation data.
+fun drawWheelJoint(d: ref DebugDraw,base: ref raw.JointSim,xfA: Transform,xfB: Transform,ctx: ref DrawSnapshot) -> () = {
+    var joint: ref raw.WheelJoint = &base.wheelJoint;
+    let pA: Vec2 = b2TransformPoint(xfA,base.localOriginAnchorA);let pB: Vec2 = b2TransformPoint(xfB,base.localOriginAnchorB);let axis: Vec2 = b2RotateVector(xfA.q,joint.localAxisA);
+    d.DrawSegmentFcn(pA,pB,Blue,ctx);
+    if(joint.enableLimit){
+        let lower: Vec2 = b2MulAdd(pA,joint.lowerTranslation,axis);let upper: Vec2 = b2MulAdd(pA,joint.upperTranslation,axis);let perp: Vec2 = b2LeftPerp(axis);
+        d.DrawSegmentFcn(lower,upper,Gray,ctx);d.DrawSegmentFcn(distance.b2MulSub(lower,0.1f32,perp),b2MulAdd(lower,0.1f32,perp),Green,ctx);d.DrawSegmentFcn(distance.b2MulSub(upper,0.1f32,perp),b2MulAdd(upper,0.1f32,perp),Red,ctx);
+    }else d.DrawSegmentFcn(distance.b2MulSub(pA,1.0f32,axis),b2MulAdd(pA,1.0f32,axis),Gray,ctx);
+    d.DrawPointFcn(pA,5.0f32,Gray,ctx);d.DrawPointFcn(pB,5.0f32,DimGray,ctx);
+}
+fun drawJoint(d: ref DebugDraw,w: ref raw.World,joint: ref raw.JointRecord,ctx: ref DrawSnapshot) -> () = {
+    var a: ref raw.BodyRecord = w.bodies.at(joint.edgeA.bodyId as i64);var b: ref raw.BodyRecord = w.bodies.at(joint.edgeB.bodyId as i64);
+    if(a.setIndex == 1i32 or b.setIndex == 1i32)return;
+    var sim: ref raw.JointSim = raw.b2GetJointSim(w,joint.jointId);
+    let xfA: Transform = raw.b2GetBodySim(w,a).transform;let xfB: Transform = raw.b2GetBodySim(w,b).transform;
+    let pA: Vec2 = b2TransformPoint(xfA,sim.localOriginAnchorA);let pB: Vec2 = b2TransformPoint(xfB,sim.localOriginAnchorB);
+    if(joint.jointType == 0i32)drawDistanceJoint(d,sim,xfA,xfB,ctx);
+    else if(joint.jointType == 1i32)d.DrawSegmentFcn(pA,pB,Gold,ctx);
+    else if(joint.jointType == 3i32){let target: Vec2 = sim.mouseJoint.targetA;d.DrawPointFcn(target,4.0f32,Green,ctx);d.DrawPointFcn(pB,4.0f32,Green,ctx);d.DrawSegmentFcn(target,pB,LightGray,ctx);}
+    else if(joint.jointType == 4i32)drawPrismaticJoint(d,sim,xfA,xfB,ctx);
+    else if(joint.jointType == 5i32)drawRevoluteJoint(d,sim,xfA,xfB,joint.drawSize,ctx);
+    else if(joint.jointType == 7i32)drawWheelJoint(d,sim,xfA,xfB,ctx);
+    else {d.DrawSegmentFcn(xfA.p,pA,DarkSeaGreen,ctx);d.DrawSegmentFcn(pA,pB,DarkSeaGreen,ctx);d.DrawSegmentFcn(xfB.p,pB,DarkSeaGreen,ctx);}
+    if(d.settings.drawGraphColors and joint.colorIndex != -1i32)d.DrawPointFcn(b2Lerp(pA,pB,0.5f32),5.0f32,graphColor(joint.colorIndex),ctx);
+}
+fun drawContact(d: ref DebugDraw,sim: ref raw.ContactSim,colorIndex: i32,bounded: bool,ctx: ref DrawSnapshot) -> () = {
+    let normal: Vec2 = sim.manifold.normal;var j: i32 = 0i32;
+    while(j<sim.manifold.pointCount){
+        let pt: ManifoldPoint = if j == 0i32 then sim.manifold.point0 else sim.manifold.point1;
+        if(d.settings.drawGraphColors)d.DrawPointFcn(pt.point,if colorIndex == 11i32 then 7.5f32 else 5.0f32,graphColor(colorIndex),ctx);
+        else if(pt.separation>B2_LINEAR_SLOP)d.DrawPointFcn(pt.point,5.0f32,if bounded then Gainsboro else LightGray,ctx);
+        else if(not pt.persisted)d.DrawPointFcn(pt.point,10.0f32,Green,ctx);
+        else d.DrawPointFcn(pt.point,5.0f32,Blue,ctx);
+        if(d.settings.drawContactNormals)d.DrawSegmentFcn(pt.point,b2MulAdd(pt.point,0.3f32,normal),DimGray,ctx);
+        else if(d.settings.drawContactImpulses){
+            let impulse: f32 = if bounded then pt.normalImpulse else pt.totalNormalImpulse;
+            d.DrawSegmentFcn(pt.point,b2MulAdd(pt.point,1.0f32*impulse,normal),Magenta,ctx);
+            drawNumber(d,pt.point,if bounded then "%.1f\0" else "%.2f\0",1000.0f32*impulse,White,ctx);
+        }
+        if(d.settings.drawContactFeatures)drawInteger(d,pt.point,pt.id as i32,Orange,ctx);
+        if(d.settings.drawFrictionImpulses){
+            d.DrawSegmentFcn(pt.point,b2MulAdd(pt.point,1.0f32*pt.tangentImpulse,b2RightPerp(normal)),Yellow,ctx);
+            drawNumber(d,pt.point,if bounded then "%.1f\0" else "%.2f\0",if bounded then 1000.0f32*pt.tangentImpulse else pt.tangentImpulse,White,ctx);
+        }
+        j += 1i32;
+    }
+}
+
+fun marks(n: i64) -> List[bool] = {var a: List[bool];var i: i64 = 0i64;while(i<n){a.push(false);i += 1i64;}return a;}
+# world.c:873-957. Query visit order, not shape-slot order.
+fun drawQueryCallback(shapeId: i32,w: ref raw.World,d: ref DebugDraw,bodies: ref List[bool],ctx: ref DrawSnapshot) -> () = {
+    var shape: ref raw.ShapeRecord = w.shapes.at(shapeId as i64);bodies.at(shape.bodyId as i64) = true;
+    if(d.settings.drawShapes){var body: ref raw.BodyRecord = w.bodies.at(shape.bodyId as i64);var sim: ref raw.BodySim = raw.b2GetBodySim(w,body);drawShape(d,shape,sim.transform,shapeColor(body,sim,shape),ctx);}
+    if(d.settings.drawBounds)drawAABB(d,shape.fatAABB,Gold,ctx);
+}
+# world.c:961-1159. Local owning scratch replaces only original debug bitsets.
+fun drawWithBounds(w: ref raw.World,d: ref DebugDraw,ctx: ref DrawSnapshot) -> () = {
+    var bodies: List[bool] = marks(w.bodies.length());var joints: List[bool] = marks(w.joints.length());var contacts: List[bool] = marks(w.contacts.length());
+    const MARK_BYTES: i64 = builtins.size_of(bool);
+    let markBytes: i64 = (bodies.cap+joints.cap+contacts.cap)*MARK_BYTES;raw.scratchChange(w,markBytes);
+    var ti: i32 = 0i32;while(ti<3i32){
+        var query: tree.TreeQueryResult = tree.b2DynamicTree_Query(&w.broadPhase.trees[ti],d.settings.drawingBounds,-1i64,true);
+        let queryBytes: i64 = raw.queryScratchBytes(&query);raw.scratchChange(w,queryBytes);
+        var qi: i64 = 0i64;while(qi<query.hits.length()){drawQueryCallback(query.hits.at(qi).userData as i32,w,d,&bodies,ctx);qi += 1i64;}raw.scratchChange(w,-queryBytes);ti += 1i32;
+    }
+    var bi: i64 = 0i64;while(bi<bodies.length()){
+        if(bodies.at(bi)){
+            var body: ref raw.BodyRecord = w.bodies.at(bi);
+            if(d.settings.drawBodyNames and body.name[0] != 0u8){
+                var sim: ref raw.BodySim = raw.b2GetBodySim(w,body);let xf: Transform = Transform(sim.center,sim.transform.q);
+                d.DrawStringFcn(b2TransformPoint(xf,Vec2(0.1f32,0.1f32)),&body.name[0] as cptr char,BlueViolet,ctx);
+            }
+            if(d.settings.drawMass and body.bodyType == 2i32){
+                var simMass: ref raw.BodySim = raw.b2GetBodySim(w,body);let xfMass: Transform = Transform(simMass.center,simMass.transform.q);
+                d.DrawTransformFcn(xfMass,ctx);drawNumber(d,b2TransformPoint(xfMass,Vec2(0.1f32,0.1f32)),"  %.2f\0",body.mass,White,ctx);
+            }
+            if(d.settings.drawJoints){var key: i32 = body.headJointKey;while(key != -1i32){
+                let jid: i32 = key >> 1i32;let edge: i32 = key&1i32;var joint: ref raw.JointRecord = w.joints.at(jid as i64);
+                if(not joints.at(jid as i64)){drawJoint(d,w,joint,ctx);joints.at(jid as i64) = true;}
+                key = if edge == 0i32 then joint.edgeA.nextKey else joint.edgeB.nextKey;
+            }}
+            if(d.settings.drawContacts and body.bodyType == 2i32 and body.setIndex == 2i32){var ck: i32 = body.headContactKey;while(ck != -1i32){
+                let cid: i32 = ck >> 1i32;let ce: i32 = ck&1i32;var contact: ref raw.ContactRecord = w.contacts.at(cid as i64);
+                ck = raw.contactEdge(contact,ce).nextKey;
+                if(contact.setIndex == 2i32 and contact.colorIndex != -1i32 and not contacts.at(cid as i64)){
+                    drawContact(d,raw.b2GetContactSim(w,contact),contact.colorIndex,true,ctx);contacts.at(cid as i64) = true;
+                }
+            }}
+        }
+        bi += 1i64;
+    }
+    raw.scratchChange(w,-markBytes);
+}
+# world.c:1161-1489. Full traversal intentionally differs from bounded traversal.
+fun worldDraw(id: raw.WorldId,d: ref DebugDraw,ctx: ref DrawSnapshot) -> () = {
+    var w: ref raw.World = raw.worlds.at((id.index1-1u16) as i64);if(w.locked)return;
+    if(d.settings.useDrawingBounds){drawWithBounds(w,d,ctx);return;}
+    if(d.settings.drawShapes){var si: i64 = 0i64;while(si<w.solverSets.length()){
+        var set: ref raw.SolverSet = w.solverSets.at(si);var bi: i32 = 0i32;while(bi<set.bodyCount){
+            var sim: ref raw.BodySim = set.bodySims.at(bi as i64);var body: ref raw.BodyRecord = w.bodies.at(sim.bodyId as i64);var sh: i32 = body.headShapeId;
+            while(sh != -1i32){var shape: ref raw.ShapeRecord = w.shapes.at(sh as i64);drawShape(d,shape,sim.transform,shapeColor(body,sim,shape),ctx);sh = shape.nextShapeId;}bi += 1i32;
+        }si += 1i64;
+    }}
+    if(d.settings.drawJoints){var ji: i64 = 0i64;while(ji<w.joints.length()){var joint: ref raw.JointRecord = w.joints.at(ji);if(joint.setIndex != -1i32)drawJoint(d,w,joint,ctx);ji += 1i64;}}
+    if(d.settings.drawBounds){var bs: i64 = 0i64;while(bs<w.solverSets.length()){
+        var boundsSet: ref raw.SolverSet = w.solverSets.at(bs);var bb: i32 = 0i32;while(bb<boundsSet.bodyCount){
+            var boundsSim: ref raw.BodySim = boundsSet.bodySims.at(bb as i64);drawInteger(d,boundsSim.center,boundsSim.bodyId,White,ctx);
+            var shapeId: i32 = w.bodies.at(boundsSim.bodyId as i64).headShapeId;while(shapeId != -1i32){var boundsShape: ref raw.ShapeRecord = w.shapes.at(shapeId as i64);drawAABB(d,boundsShape.fatAABB,Gold,ctx);shapeId = boundsShape.nextShapeId;}bb += 1i32;
+        }bs += 1i64;
+    }}
+    if(d.settings.drawBodyNames){var ni: i64 = 0i64;while(ni<w.bodies.length()){
+        var named: ref raw.BodyRecord = w.bodies.at(ni);if(named.setIndex != -1i32 and named.name[0] != 0u8){
+            var namedSim: ref raw.BodySim = raw.b2GetBodySim(w,named);let nameXf: Transform = Transform(namedSim.center,namedSim.transform.q);
+            d.DrawStringFcn(b2TransformPoint(nameXf,Vec2(0.05f32,0.05f32)),&named.name[0] as cptr char,BlueViolet,ctx);
+        }ni += 1i64;
+    }}
+    if(d.settings.drawMass){var ms: i64 = 0i64;while(ms<w.solverSets.length()){
+        var massSet: ref raw.SolverSet = w.solverSets.at(ms);var mb: i32 = 0i32;while(mb<massSet.bodyCount){
+            var massSim: ref raw.BodySim = massSet.bodySims.at(mb as i64);let massXf: Transform = Transform(massSim.center,massSim.transform.q);d.DrawTransformFcn(massXf,ctx);
+            let value: f32 = if massSim.invMass>0.0f32 then 1.0f32/massSim.invMass else 0.0f32;drawNumber(d,b2TransformPoint(massXf,Vec2(0.1f32,0.1f32)),"  %.2f\0",value,White,ctx);mb += 1i32;
+        }ms += 1i64;
+    }}
+    if(d.settings.drawContacts){var ci: i32 = 0i32;while(ci<12i32){var gc: ref raw.GraphColor = &w.constraintGraph.colors[ci];var cc: i32 = 0i32;while(cc<gc.contactCount){drawContact(d,gc.contactSims.at(cc as i64),ci,false,ctx);cc += 1i32;}ci += 1i32;}}
+    if(d.settings.drawIslands){var ii: i64 = 0i64;while(ii<w.islands.length()){
+        var island: ref raw.Island = w.islands.at(ii);if(island.setIndex != -1i32){
+            var a = tree.AABB(Vec2(poly.FLT_MAX,poly.FLT_MAX),Vec2(-poly.FLT_MAX,-poly.FLT_MAX));var count: i32 = 0i32;var ib: i32 = island.headBody;
+            while(ib != -1i32){var islandBody: ref raw.BodyRecord = w.bodies.at(ib as i64);var ish: i32 = islandBody.headShapeId;
+                while(ish != -1i32){var islandShape: ref raw.ShapeRecord = w.shapes.at(ish as i64);a = tree.b2AABB_Union(a,islandShape.fatAABB);count += 1i32;ish = islandShape.nextShapeId;}ib = islandBody.islandNext;
+            }
+            if(count>0i32)drawAABB(d,a,OrangeRed,ctx);
+        }ii += 1i64;
+    }}
+}
+
+# Box2D math_functions.c:107-151. Existing base has no MakeRot helper.
+fun makeRot(radians: f32) -> Rot = { return b2MakeRot(radians); }

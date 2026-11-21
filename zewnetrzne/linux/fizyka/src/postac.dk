@@ -1,0 +1,211 @@
+# Application-owned character; the checked mover supplies all collision physics.
+# SolveMove recipe: Box2D 3.1.1 sample_character.cpp:371-407 (Erin Catto, MIT).
+import fizyka.gra as game;
+import fizyka.start as start;
+import fizyka.swiat as defs;
+import fizyka.mover as mover;
+import fizyka.zapytaniaswiata as query;
+import fizyka.kola.*;
+import fizyka.zbior.equalKey;
+import fizyka.drzewo as tree;
+import fizyka.wielokaty as poly;
+import fizyka.ruch as motion;
+
+class CharacterSettings {
+    runSpeed: f32 = 4.0f32; jumpSpeed: f32 = 6.0f32;
+    gravity: f32 = 10.0f32; maxFallSpeed: f32 = 20.0f32;
+}
+class CharacterInput { axis: i32 = 0i32; jump: bool = false; }
+class CharacterSnapshot {
+    stepIndex: i64 = 0i64;
+    position: Vec2 = Vec2(); velocity: Vec2 = Vec2();
+    grounded: bool = false; alive: bool = true; jumpArmed: bool = true;
+    hasEnemy: bool = false; enemy: game.ShapeNumber = game.ShapeNumber();
+    capsule: defs.Capsule = defs.Capsule(Vec2(0.0f32,-0.5f32),Vec2(0.0f32,0.5f32),0.3f32);
+}
+class Character {
+    world: game.WorldNumber = game.WorldNumber();
+    settings: CharacterSettings = CharacterSettings();
+    state: CharacterSnapshot = CharacterSnapshot(); input: CharacterInput = CharacterInput();
+}
+class CharacterAction { status: i32 = game.STALE; reason: i32 = 0i32; }
+class CharacterResult { status: i32 = game.STALE; reason: i32 = 0i32; value: Character = Character(); }
+class CharacterStep {
+    status: i32 = game.STALE; reason: i32 = 0i32; value: CharacterSnapshot = CharacterSnapshot();
+    jumped: bool = false; hitEnemy: bool = false;
+}
+class CharacterRead { status: i32 = game.STALE; reason: i32 = 0i32; value: CharacterSnapshot = CharacterSnapshot(); }
+
+fun characterMessage(status: i32, reason: i32) -> str = {
+    if (status == game.OK) return "OK";
+    if (status == game.LOCKED and reason == 1i32) return "CHARACTER: WORLD_LOCKED";
+    if (status == game.STALE and reason == 0i32) return "CHARACTER: STALE";
+    if (status == game.FOREIGN and reason == 0i32) return "CHARACTER: FOREIGN";
+    if (status == game.LIMIT and reason == 0i32) return "CHARACTER: LIMIT";
+    if (status == game.PARAM) {
+        if (reason == 3101i32) return "CHARACTER: RUN_SPEED";
+        if (reason == 3102i32) return "CHARACTER: JUMP_SPEED";
+        if (reason == 3103i32) return "CHARACTER: GRAVITY_OR_FALL_SPEED";
+        if (reason == 3104i32) return "CHARACTER: INPUT_AXIS";
+        if (reason == 3105i32) return "CHARACTER: STEP_SEQUENCE";
+        if (reason == 3106i32) return "CHARACTER: ENEMY_TYPE";
+    }
+    if ((status == game.GEOMETRY or status == game.PARAM) and reason == 3107i32) return "CHARACTER: POSITION";
+    if (status == game.GEOMETRY and reason == 3108i32) return "CHARACTER: FLOOR_POINTS";
+    return "CHARACTER: API";
+}
+fun characterCapsule(position: Vec2) -> defs.Capsule = {
+    return defs.Capsule(Vec2(position.x,position.y-0.5f32),Vec2(position.x,position.y+0.5f32),0.3f32);
+}
+fun characterWorld(session: ref start.GameSession, character: ref Character, mutation: bool) -> CharacterAction = {
+    let status: i32 = if mutation then game.worldMutationStatus(character.world) else game.worldStatus(character.world);
+    if (status != game.OK) return CharacterAction(status,if status == game.LOCKED then 1i32 else 0i32);
+    if (character.world.slot != session.world.slot or not equalKey(character.world.birthTicket,session.world.birthTicket))
+        return CharacterAction(game.FOREIGN);
+    return CharacterAction(game.OK);
+}
+fun addFloor(session: ref start.GameSession, points: ref List[Vec2]) -> game.ChainBodyResult = {
+    var result = game.ChainBodyResult();
+    result.status = game.worldMutationStatus(session.world);
+    if (result.status != game.OK) { result.reason = if result.status == game.LOCKED then 1i32 else 0i32; return result; }
+    let count: i64 = points.length();
+    if (count < 2i64 or count > 1024i64) { result.status = game.GEOMETRY; result.reason = 3108i32; return result; }
+    var i: i64 = 0i64;
+    while (i < count) {
+        if (not game.finiteVector(points.at(i))) { result.status = game.GEOMETRY; result.reason = 3108i32; return result; }
+        if (i > 0i64 and not (points.at(i).x > points.at(i-1i64).x)) {
+            result.status = game.GEOMETRY; result.reason = 3108i32; return result;
+        }
+        i += 1i64;
+    }
+    var description = game.ChainDescription();
+    description.points.push(b2Add(points.at(count-1i64),b2Sub(points.at(count-1i64),points.at(count-2i64))));
+    i = count;
+    while (i > 0i64) { i -= 1i64; description.points.push(points.at(i)); }
+    description.points.push(b2Add(points.at(0i64),b2Sub(points.at(0i64),points.at(1i64))));
+    return game.createStaticChain(session.world,&description);
+}
+fun bindCharacter(session: ref start.GameSession, position: Vec2,
+    settings: CharacterSettings = CharacterSettings()) -> CharacterResult = {
+    let status: i32 = game.worldMutationStatus(session.world);
+    if (status != game.OK) return CharacterResult(status,if status == game.LOCKED then 1i32 else 0i32);
+    if (not game.finite(settings.runSpeed) or not (settings.runSpeed > 0.0f32) or settings.runSpeed > 20.0f32)
+        return CharacterResult(game.PARAM,3101i32);
+    if (not game.finite(settings.jumpSpeed) or not (settings.jumpSpeed > 0.0f32) or settings.jumpSpeed > 20.0f32)
+        return CharacterResult(game.PARAM,3102i32);
+    if (not game.finite(settings.gravity) or not (settings.gravity > 0.0f32) or settings.gravity > 100.0f32
+        or not game.finite(settings.maxFallSpeed) or not (settings.maxFallSpeed > 0.0f32) or settings.maxFallSpeed > 100.0f32)
+        return CharacterResult(game.PARAM,3103i32);
+    if (not game.finiteVector(position)) return CharacterResult(game.GEOMETRY,3107i32);
+    var value = Character(); value.world = session.world; value.settings = settings;
+    value.state.stepIndex = session.stepIndex; value.state.position = position; value.state.capsule = characterCapsule(position);
+    return CharacterResult(game.OK,0i32,value);
+}
+fun watchEnemy(session: ref start.GameSession, character: ref Character, enemy: game.ShapeNumber) -> CharacterAction = {
+    # Match gra: lifetime/owner of the supplied target precedes the lock check.
+    let alive: i32 = game.shapeStatus(character.world,enemy);
+    if (alive != game.OK) return CharacterAction(alive);
+    let gate = characterWorld(session,character,true); if (gate.status != game.OK) return gate;
+    if (session.stepIndex != character.state.stepIndex) return CharacterAction(game.PARAM,3105i32);
+    let shape = game.lookupShape(character.world,enemy);
+    if (shape.status != game.OK) return CharacterAction(shape.status);
+    let parent = game.shapeBody(character.world,enemy);
+    if (parent.status != game.OK) return CharacterAction(parent.status);
+    let body = game.lookupBody(character.world,parent.number);
+    if (body.status != game.OK) return CharacterAction(body.status);
+    if (shape.value.shapeType != 3i32 or shape.value.isSensor or body.value.bodyType != 0i32 or not body.value.isEnabled)
+        return CharacterAction(game.PARAM,3106i32);
+    character.state.enemy = enemy; character.state.hasEnemy = true;
+    return CharacterAction(game.OK);
+}
+fun setCharacterInput(session: ref start.GameSession, character: ref Character, input: CharacterInput) -> CharacterAction = {
+    let gate = characterWorld(session,character,true); if (gate.status != game.OK) return gate;
+    if (session.stepIndex != character.state.stepIndex) return CharacterAction(game.PARAM,3105i32);
+    if (input.axis < -1i32 or input.axis > 1i32) return CharacterAction(game.PARAM,3104i32);
+    character.input = input; return CharacterAction(game.OK);
+}
+fun readCharacter(session: ref start.GameSession, character: ref Character) -> CharacterRead = {
+    let gate = characterWorld(session,character,false);
+    if (gate.status != game.OK) return CharacterRead(gate.status,gate.reason);
+    return CharacterRead(game.OK,0i32,character.state);
+}
+fun characterEnemyHit(state: ref CharacterSnapshot, hits: ref List[mover.MoverPlaneHit]) -> bool = {
+    if (not state.hasEnemy) return false;
+    var i: i64 = 0i64;
+    while (i < hits.length()) {
+        let number: game.ShapeNumber = hits.at(i).shape;
+        if (number.slot == state.enemy.slot and equalKey(number.birthTicket,state.enemy.birthTicket)
+            and equalKey(number.ownerTicket,state.enemy.ownerTicket)) return true;
+        i += 1i64;
+    }
+    return false;
+}
+fun moveCharacterAfterStep(session: ref start.GameSession, character: ref Character) -> CharacterStep = {
+    let gate = characterWorld(session,character,true);
+    if (gate.status != game.OK) return CharacterStep(gate.status,gate.reason);
+    if (character.state.stepIndex == 9223372036854775807i64) return CharacterStep(game.LIMIT);
+    if (session.stepIndex != character.state.stepIndex+1i64) return CharacterStep(game.PARAM,3105i32);
+    if (character.state.hasEnemy) {
+        let status: i32 = game.shapeStatus(character.world,character.state.enemy);
+        if (status != game.OK) return CharacterStep(status);
+    }
+    var state: CharacterSnapshot = character.state;
+    var jumped: bool = false; var hitEnemy: bool = false;
+    if (not state.alive) { state.velocity = Vec2(); state.grounded = false; }
+    else {
+        state.velocity.x = (character.input.axis as f32)*character.settings.runSpeed;
+        if (character.input.jump and state.jumpArmed and state.grounded) {
+            state.velocity.y = character.settings.jumpSpeed; state.grounded = false; jumped = true;
+        }
+        state.jumpArmed = not character.input.jump;
+        let dt: f32 = 1.0f32/(session.settings.stepsPerSecond as f32);
+        let gravityDelta: f32 = character.settings.gravity*dt;
+        state.velocity.y = tree.b2MaxFloat(state.velocity.y-gravityDelta,-character.settings.maxFallSpeed);
+        let target: Vec2 = b2Add(state.position,motion.b2MulSV(dt,state.velocity));
+        if (not game.finiteVector(target) or not game.finiteVector(state.velocity)) return CharacterStep(game.PARAM,3107i32);
+        var filter = query.WorldQueryFilter(); filter.bodyTypeBits = 1i32; filter.includeSensors = false;
+        var lastPlanes: List[mover.CollisionPlane];
+        var pass: i32 = 0i32; var done: bool = false;
+        while (pass < 5i32 and not done) {
+            var capsule: defs.Capsule = characterCapsule(state.position);
+            var hits = mover.collideMoverCollect(character.world,&capsule,filter);
+            if (hits.status != game.OK) return CharacterStep(hits.status,hits.reason);
+            if (characterEnemyHit(&state,&hits.values)) hitEnemy = true;
+            var planes: List[mover.CollisionPlane]; var i: i64 = 0i64;
+            while (i < hits.values.length()) {
+                planes.push(mover.CollisionPlane(hits.values.at(i).result.plane,3.402823466e38f32,0.0f32,true)); i += 1i64;
+            }
+            let desired: Vec2 = b2Sub(target,state.position);
+            if (not game.finiteVector(desired)) return CharacterStep(game.PARAM,3107i32);
+            var solved = mover.solvePlanes(desired,&planes,planes.length() as i32);
+            if (solved.status != game.OK) return CharacterStep(solved.status,solved.reason);
+            let casted = mover.castMover(character.world,&capsule,solved.translation,filter);
+            if (casted.status != game.OK) return CharacterStep(casted.status,casted.reason);
+            let delta: Vec2 = motion.b2MulSV(casted.value,solved.translation);
+            state.position = b2Add(state.position,delta);
+            if (not game.finiteVector(state.position)) return CharacterStep(game.PARAM,3107i32);
+            lastPlanes = copy solved.planes;
+            done = poly.b2Dot(delta,delta) < 0.01f32*0.01f32;
+            pass += 1i32;
+        }
+        let clipped = mover.clipVector(state.velocity,&lastPlanes,lastPlanes.length() as i32);
+        if (clipped.status != game.OK) return CharacterStep(clipped.status,clipped.reason);
+        state.velocity = clipped.value;
+        var finalCapsule: defs.Capsule = characterCapsule(state.position);
+        var finalHits = mover.collideMoverCollect(character.world,&finalCapsule,filter);
+        if (finalHits.status != game.OK) return CharacterStep(finalHits.status,finalHits.reason);
+        state.grounded = false; var finalIndex: i64 = 0i64;
+        while (finalIndex < finalHits.values.length()) {
+            if (finalHits.values.at(finalIndex).result.plane.normal.y >= 0.7f32 and state.velocity.y <= 0.0f32) state.grounded = true;
+            finalIndex += 1i64;
+        }
+        if (characterEnemyHit(&state,&finalHits.values)) hitEnemy = true;
+        if (hitEnemy) { state.alive = false; state.grounded = false; state.velocity = Vec2(); }
+    }
+    state.stepIndex = session.stepIndex; state.capsule = characterCapsule(state.position);
+    if (not game.finiteVector(state.position) or not game.finiteVector(state.velocity)
+        or not game.finiteVector(state.capsule.center1) or not game.finiteVector(state.capsule.center2))
+        return CharacterStep(game.PARAM,3107i32);
+    character.state = state;
+    return CharacterStep(game.OK,0i32,state,jumped,hitEnemy);
+}

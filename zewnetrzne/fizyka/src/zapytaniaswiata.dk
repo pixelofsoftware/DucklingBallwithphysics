@@ -1,0 +1,560 @@
+#{
+SPDX-FileCopyrightText: 2023 Erin Catto
+SPDX-License-Identifier: MIT
+
+MIT License
+
+Copyright (c) 2022 Erin Catto
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+#}
+
+# Box2D 3.1.1 + poprawki.patch (#951). Raw callbacks and checked query values.
+import fizyka.kola.*;
+import fizyka.drzewo as tree;
+import fizyka.zapytania as local;
+import fizyka.ruch as motion;
+import fizyka.wielokaty as poly;
+import fizyka.swiat as world;
+import fizyka.rdzen as asserts;
+import fizyka.zbior.Key64;
+import fizyka.szeroka as broad;
+import fizyka.odleglosc as distance;
+import fizyka.gra as game;
+
+class TreeStats { nodeVisits: i32 = 0i32; leafVisits: i32 = 0i32; }
+
+# collision.h:698-742. Callbacks must not mutate the traversed tree or retain input.
+# dynamic_tree.c:1114-1177. The old collect-all API is untouched.
+fun b2DynamicTree_Query(t: ref tree.DynamicTree, aabb: tree.AABB, mask: i64,
+    callback: funptr(i32,i64,Key64) -> bool, context: Key64) -> TreeStats = {
+    var result = TreeStats(); if (t.nodeCount == 0i32) return result;
+    var stack: i32[1024]; const STACK_BYTES: i64 = 1024i64*builtins.size_of(i32);tree.scratchTree(t,STACK_BYTES); var count: i32 = 1i32; stack[0i32] = t.root;
+    while (count > 0i32) {
+        count -= 1i32; let id: i32 = stack[count];
+        if (id != tree.B2_NULL_INDEX) {
+            let node: tree.TreeNode = t.nodes.at(id as i64); result.nodeVisits += 1i32;
+            if (tree.b2AABB_Overlaps(node.aabb,aabb) and (node.categoryBits & mask) != 0i64) {
+                if ((node.flags & tree.b2_leafNode) != 0u16) {
+                    let proceed: bool = callback(id,node.userData,context); result.leafVisits += 1i32;
+                    if (not proceed) { tree.scratchTree(t,-STACK_BYTES);return result; }
+                } else if (count < tree.B2_TREE_STACK_SIZE-1i32) {
+                    stack[count] = node.child1; stack[count+1i32] = node.child2; count += 2i32;
+                }
+            }
+        }
+    }
+    { tree.scratchTree(t,-STACK_BYTES);return result; }
+}
+
+fun extents(a: tree.AABB) -> Vec2 = { return motion.b2MulSV(0.5f32,b2Sub(a.upperBound,a.lowerBound)); }
+fun absolute(v: Vec2) -> Vec2 = { return Vec2(motion.b2AbsFloat(v.x),motion.b2AbsFloat(v.y)); }
+
+# dynamic_tree.c:1179-1303. Input is borrowed; the callback sees a local subinput.
+fun b2DynamicTree_RayCast(t: ref tree.DynamicTree, input: ref local.RayCastInput, mask: i64,
+    callback: funptr(ref local.RayCastInput,i32,i64,Key64) -> f32, context: Key64) -> TreeStats = {
+    var result = TreeStats(); if (t.nodeCount == 0i32) return result;
+    let p1: Vec2 = input.origin; let d: Vec2 = input.translation;
+    let r: Vec2 = motion.b2Normalize(d); let v = Vec2(-r.y,r.x); let absV: Vec2 = absolute(v);
+    var fraction: f32 = input.maxFraction; var p2: Vec2 = b2MulAdd(p1,fraction,d);
+    var bounds = tree.AABB(tree.b2Min(p1,p2),tree.b2Max(p1,p2));
+    var stack: i32[1024]; const STACK_BYTES: i64 = 1024i64*builtins.size_of(i32);tree.scratchTree(t,STACK_BYTES); var count: i32 = 1i32; stack[0i32] = t.root;
+    var subInput: local.RayCastInput = input;
+    while (count > 0i32) {
+        count -= 1i32; let id: i32 = stack[count];
+        if (id != tree.B2_NULL_INDEX) {
+            let node: tree.TreeNode = t.nodes.at(id as i64); result.nodeVisits += 1i32;
+            if ((node.categoryBits & mask) != 0i64 and tree.b2AABB_Overlaps(node.aabb,bounds)) {
+                let center: Vec2 = tree.b2AABB_Center(node.aabb); let half: Vec2 = extents(node.aabb);
+                if (not (poly.b2Dot(absV,half) < motion.b2AbsFloat(poly.b2Dot(v,b2Sub(p1,center))))) {
+                    if ((node.flags & tree.b2_leafNode) != 0u16) {
+                        subInput.maxFraction = fraction;
+                        let value: f32 = callback(&subInput,id,node.userData,context); result.leafVisits += 1i32;
+                        if (value == 0.0f32) { tree.scratchTree(t,-STACK_BYTES);return result; }
+                        if (0.0f32 < value and value <= fraction) {
+                            fraction = value; p2 = b2MulAdd(p1,fraction,d);
+                            bounds.lowerBound = tree.b2Min(p1,p2); bounds.upperBound = tree.b2Max(p1,p2);
+                        }
+                    } else if (count < tree.B2_TREE_STACK_SIZE-1i32) {
+                        let c1: Vec2 = tree.b2AABB_Center(t.nodes.at(node.child1 as i64).aabb);
+                        let c2: Vec2 = tree.b2AABB_Center(t.nodes.at(node.child2 as i64).aabb);
+                        if (poly.b2DistanceSquared(c1,p1) < poly.b2DistanceSquared(c2,p1)) {
+                            stack[count] = node.child2; stack[count+1i32] = node.child1;
+                        } else { stack[count] = node.child1; stack[count+1i32] = node.child2; }
+                        count += 2i32;
+                    }
+                }
+            }
+        }
+    }
+    { tree.scratchTree(t,-STACK_BYTES);return result; }
+}
+
+# dynamic_tree.c:1305-1437. Shape clipping is strict <, unlike ray <=.
+fun b2DynamicTree_ShapeCast(t: ref tree.DynamicTree, input: ref local.ShapeCastInput, mask: i64,
+    callback: funptr(ref local.ShapeCastInput,i32,i64,Key64) -> f32, context: Key64) -> TreeStats = {
+    var result = TreeStats(); if (t.nodeCount == 0i32 or input.proxy.count == 0i32) return result;
+    var origin = tree.AABB(input.proxy.points[0i32],input.proxy.points[0i32]); var i: i32 = 1i32;
+    while (i < input.proxy.count) {
+        origin.lowerBound = tree.b2Min(origin.lowerBound,input.proxy.points[i]);
+        origin.upperBound = tree.b2Max(origin.upperBound,input.proxy.points[i]); i += 1i32;
+    }
+    let radius = Vec2(input.proxy.radius,input.proxy.radius);
+    origin.lowerBound = b2Sub(origin.lowerBound,radius); origin.upperBound = b2Add(origin.upperBound,radius);
+    let p1: Vec2 = tree.b2AABB_Center(origin); let extension: Vec2 = extents(origin);
+    let r: Vec2 = input.translation; let v = Vec2(-r.y,r.x); let absV: Vec2 = absolute(v);
+    var fraction: f32 = input.maxFraction; var delta: Vec2 = motion.b2MulSV(fraction,r);
+    var bounds = tree.AABB(tree.b2Min(origin.lowerBound,b2Add(origin.lowerBound,delta)),tree.b2Max(origin.upperBound,b2Add(origin.upperBound,delta)));
+    var subInput: local.ShapeCastInput = input;
+    var stack: i32[1024]; const STACK_BYTES: i64 = 1024i64*builtins.size_of(i32);tree.scratchTree(t,STACK_BYTES); var count: i32 = 1i32; stack[0i32] = t.root;
+    while (count > 0i32) {
+        count -= 1i32; let id: i32 = stack[count];
+        if (id != tree.B2_NULL_INDEX) {
+            let node: tree.TreeNode = t.nodes.at(id as i64); result.nodeVisits += 1i32;
+            if ((node.categoryBits & mask) != 0i64 and tree.b2AABB_Overlaps(node.aabb,bounds)) {
+                let center: Vec2 = tree.b2AABB_Center(node.aabb); let half: Vec2 = b2Add(extents(node.aabb),extension);
+                if (not (poly.b2Dot(absV,half) < motion.b2AbsFloat(poly.b2Dot(v,b2Sub(p1,center))))) {
+                    if ((node.flags & tree.b2_leafNode) != 0u16) {
+                        subInput.maxFraction = fraction;
+                        let value: f32 = callback(&subInput,id,node.userData,context); result.leafVisits += 1i32;
+                        if (value == 0.0f32) { tree.scratchTree(t,-STACK_BYTES);return result; }
+                        if (0.0f32 < value and value < fraction) {
+                            fraction = value; delta = motion.b2MulSV(fraction,r);
+                            bounds.lowerBound = tree.b2Min(origin.lowerBound,b2Add(origin.lowerBound,delta));
+                            bounds.upperBound = tree.b2Max(origin.upperBound,b2Add(origin.upperBound,delta));
+                        }
+                    } else if (count < tree.B2_TREE_STACK_SIZE-1i32) {
+                        let c1: Vec2 = tree.b2AABB_Center(t.nodes.at(node.child1 as i64).aabb);
+                        let c2: Vec2 = tree.b2AABB_Center(t.nodes.at(node.child2 as i64).aabb);
+                        if (poly.b2DistanceSquared(c1,p1) < poly.b2DistanceSquared(c2,p1)) {
+                            stack[count] = node.child2; stack[count+1i32] = node.child1;
+                        } else { stack[count] = node.child1; stack[count+1i32] = node.child2; }
+                        count += 2i32;
+                    }
+                }
+            }
+        }
+    }
+    { tree.scratchTree(t,-STACK_BYTES);return result; }
+}
+
+# shape.c:792-823: transform the defined miss too (public Shape_RayCast differs).
+fun b2RayCastShape(input: ref local.RayCastInput, shape: ref world.ShapeRecord, xf: Transform) -> local.CastOutput = {
+    var subInput: local.RayCastInput = input;
+    subInput.origin = b2InvRotateVector(xf.q,b2Sub(input.origin,xf.p));
+    subInput.translation = b2InvRotateVector(xf.q,input.translation);
+    var output = local.CastOutput();
+    if (shape.shapeType == 0i32) output = local.b2RayCastCircle(&subInput,&shape.circle);
+    else if (shape.shapeType == 1i32) output = local.b2RayCastCapsule(&subInput,&shape.capsule);
+    else if (shape.shapeType == 2i32) output = local.b2RayCastSegment(&subInput,&shape.segment,false);
+    else if (shape.shapeType == 3i32) output = local.b2RayCastPolygon(&subInput,&shape.polygon);
+    else if (shape.shapeType == 4i32) output = local.b2RayCastSegment(&subInput,&shape.chainSegment.segment,true);
+    else return output;
+    output.point = b2TransformPoint(xf,output.point); output.normal = b2RotateVector(xf.q,output.normal);
+    return output;
+}
+
+# shape.c:825-871 + poprawki.patch (#951), the single corrected helper.
+fun b2ShapeCastShape(input: ref local.ShapeCastInput, shape: ref world.ShapeRecord, xf: Transform) -> local.CastOutput = {
+    var output = local.CastOutput(); if (input.proxy.count == 0i32) return output;
+    var subInput: local.ShapeCastInput = input; var i: i32 = 0i32;
+    while (i < subInput.proxy.count) { subInput.proxy.points[i] = b2InvRotateVector(xf.q,b2Sub(input.proxy.points[i],xf.p)); i += 1i32; }
+    subInput.translation = b2InvRotateVector(xf.q,input.translation);
+    if (shape.shapeType == 0i32) output = local.b2ShapeCastCircle(&subInput,&shape.circle);
+    else if (shape.shapeType == 1i32) output = local.b2ShapeCastCapsule(&subInput,&shape.capsule);
+    else if (shape.shapeType == 2i32) output = local.b2ShapeCastSegment(&subInput,&shape.segment);
+    else if (shape.shapeType == 3i32) output = local.b2ShapeCastPolygon(&subInput,&shape.polygon);
+    else if (shape.shapeType == 4i32) {
+        var centroid = Vec2(); var j: i32 = 0i32;
+        while (j < subInput.proxy.count) { centroid = b2Add(centroid,subInput.proxy.points[j]); j += 1i32; }
+        centroid = motion.b2MulSV(1.0f32 / subInput.proxy.count as f32,centroid);
+        let p1: Vec2 = shape.chainSegment.segment.point1; let p2: Vec2 = shape.chainSegment.segment.point2;
+        if (motion.b2Cross(b2Sub(centroid,p1),b2Sub(p2,p1)) < 0.0f32) return output;
+        output = local.b2ShapeCastSegment(&subInput,&shape.chainSegment.segment);
+    } else return output;
+    output.point = b2TransformPoint(xf,output.point); output.normal = b2RotateVector(xf.q,output.normal);
+    return output;
+}
+
+# World callbacks reuse the same tree traversal; frame tokens are internal only.
+# No World/Body/Shape arena is created here. The caller's Key64 remains intact.
+class QueryFilter { categoryBits: i64 = 1i64; maskBits: i64 = -1i64; }
+fun b2DefaultQueryFilter() -> QueryFilter = { return QueryFilter(); }
+fun b2ShouldQueryCollide(shape: broad.ShapeFilter, filter: QueryFilter) -> bool = {
+    return (shape.categoryBits & filter.maskBits) != 0i64 and (shape.maskBits & filter.categoryBits) != 0i64;
+}
+fun shapeTransform(w: ref world.World, s: ref world.ShapeRecord) -> Transform = {
+    return world.b2GetBodySim(w,w.bodies.at(s.bodyId as i64)).transform;
+}
+fun b2Shape_TestPoint(id: broad.ShapeId, point: Vec2) -> bool = {
+    var w: ref world.World = world.worlds.at(id.world0 as i64); var s: ref world.ShapeRecord = w.shapes.at((id.index1-1i32) as i64);
+    let xf: Transform = shapeTransform(w,s); let p: Vec2 = b2InvRotateVector(xf.q,b2Sub(point,xf.p));
+    if (s.shapeType == 0i32) return local.b2PointInCircle(p,&s.circle);
+    if (s.shapeType == 1i32) return local.b2PointInCapsule(p,&s.capsule);
+    if (s.shapeType == 3i32) return local.b2PointInPolygon(p,&s.polygon);
+    return false;
+}
+fun b2Shape_RayCast(id: broad.ShapeId, input: ref local.RayCastInput) -> local.CastOutput = {
+    var w: ref world.World = world.worlds.at(id.world0 as i64); var s: ref world.ShapeRecord = w.shapes.at((id.index1-1i32) as i64);
+    let xf: Transform = shapeTransform(w,s); var sub: local.RayCastInput = input;
+    sub.origin = b2InvRotateVector(xf.q,b2Sub(input.origin,xf.p)); sub.translation = b2InvRotateVector(xf.q,input.translation);
+    var output = local.CastOutput();
+    if (s.shapeType == 0i32) output = local.b2RayCastCircle(&sub,&s.circle);
+    else if (s.shapeType == 1i32) output = local.b2RayCastCapsule(&sub,&s.capsule);
+    else if (s.shapeType == 2i32) output = local.b2RayCastSegment(&sub,&s.segment,false);
+    else if (s.shapeType == 3i32) output = local.b2RayCastPolygon(&sub,&s.polygon);
+    else if (s.shapeType == 4i32) output = local.b2RayCastSegment(&sub,&s.chainSegment.segment,true);
+    if (output.hit) { output.point = b2TransformPoint(xf,output.point); output.normal = b2RotateVector(xf.q,output.normal); }
+    return output;
+}
+fun b2Shape_GetClosestPoint(id: broad.ShapeId, point: Vec2) -> Vec2 = {
+    var w: ref world.World = world.worlds.at(id.world0 as i64); var s: ref world.ShapeRecord = w.shapes.at((id.index1-1i32) as i64);
+    var input = distance.DistanceInput(); input.proxyA = world.b2MakeShapeDistanceProxy(s); input.transformA = shapeTransform(w,s); input.useRadii = true;
+    input.proxyB.points[0i32] = point; input.proxyB.count = 1i32; input.transformB = Transform(Vec2(),Rot(1.0f32,0.0f32));
+    var cache = distance.SimplexCache(); var trace = distance.SimplexTrace();
+    return distance.b2ShapeDistance(&input,&cache,&trace,0i32,false).pointA;
+}
+fun b2World_RebuildStaticTree(id: world.WorldId) -> () = { world.b2World_RebuildStaticTree(id); }
+fun continueOverlap(id: broad.ShapeId, context: Key64) -> bool = { return true; }
+fun continueCast(id: broad.ShapeId, point: Vec2, normal: Vec2, fraction: f32, context: Key64) -> f32 = { return 1.0f32; }
+class RayResult {
+    shapeId: broad.ShapeId = broad.ShapeId(); point: Vec2 = Vec2(); normal: Vec2 = Vec2(); fraction: f32 = 0.0f32; hit: bool = false;
+    nodeVisits: i32 = 0i32; leafVisits: i32 = 0i32;
+}
+class WorldQueryFrame {
+    slot: i32 = 0i32; filter: QueryFilter = QueryFilter(); context: Key64 = Key64();
+    overlap: funptr(broad.ShapeId,Key64) -> bool = continueOverlap;
+    cast: funptr(broad.ShapeId,Vec2,Vec2,f32,Key64) -> f32 = continueCast;
+    proxy: distance.ShapeProxy = distance.ShapeProxy(); narrow: bool = false; fraction: f32 = 1.0f32;
+    closest: bool = false; result: RayResult = RayResult();
+    checked: bool = false; checkedFilter: CheckedQueryFilter = CheckedQueryFilter();
+    collectMode: i32 = 0i32; shapeClosest: bool = false;
+    valueOverlap: funptr(ShapeQueryValue,Key64) -> bool = continueValueOverlap;
+    valueCast: funptr(HitValue,Key64) -> f32 = continueValueCast;
+}
+fun emptyWorldFrames() -> List[WorldQueryFrame] = { var result: List[WorldQueryFrame]; return result; }
+fun emptyQueryResults() -> List[QueryResult] = { var values: List[QueryResult]; return values; }
+var queryResults: List[QueryResult] = emptyQueryResults();
+var worldFrames: List[WorldQueryFrame] = emptyWorldFrames(); var worldDepth: i32 = 0i32;
+fun pushWorldFrame(frame: WorldQueryFrame) -> i32 = {
+    let index: i32 = worldDepth; if (index as i64 == worldFrames.length()) worldFrames.push(frame); else worldFrames.at(index as i64) = frame;
+    if (index as i64 == queryResults.length()) queryResults.push(QueryResult()); else queryResults.at(index as i64) = QueryResult();
+    worldDepth += 1i32; return index;
+}
+fun worldOverlapAdapter(proxyId: i32, user: i64, token: Key64) -> bool = {
+    let frame: WorldQueryFrame = worldFrames.at(token.low as i64);
+    var w: ref world.World = world.worlds.at(frame.slot as i64); var s: ref world.ShapeRecord = w.shapes.at(user);
+    if (not b2ShouldQueryCollide(s.filter,frame.filter)) return true;
+    if (frame.checked and not checkedCandidate(w,s,frame.checkedFilter)) return true;
+    if (frame.narrow) {
+        var input = distance.DistanceInput(); input.proxyA = frame.proxy; input.proxyB = world.b2MakeShapeDistanceProxy(s);
+        input.transformA = Transform(Vec2(),Rot(1.0f32,0.0f32)); input.transformB = shapeTransform(w,s); input.useRadii = true;
+        var cache = distance.SimplexCache(); var trace = distance.SimplexTrace();
+        let d: distance.DistanceOutput = distance.b2ShapeDistance(&input,&cache,&trace,0i32,false);
+        if (d.distance > 0.1f32 * B2_LINEAR_SLOP) return true;
+    }
+    let id: broad.ShapeId = world.b2MakeShapeId(w,user as i32);
+    if (frame.checked) {
+        let value: ShapeQueryValue = shapeQueryValue(w,id);
+        queryResults.at(token.low as i64).shapes.push(value);
+        return frame.valueOverlap(value,frame.context);
+    }
+    return frame.overlap(id,frame.context);
+}
+fun worldHit(index: i64, id: broad.ShapeId, output: local.CastOutput) -> f32 = {
+    let frame: WorldQueryFrame = worldFrames.at(index);
+    if (frame.checked) {
+        if (not finiteCast(output)) { queryResults.at(index).status = 5i32; queryResults.at(index).reason = 22i32; worldFrames.at(index).fraction = 0.0f32; return 0.0f32; }
+        if (frame.collectMode == 2i32 and not frame.shapeClosest and output.fraction == 0.0f32) return -1.0f32;
+        var w: ref world.World = world.worlds.at(frame.slot as i64);
+        let savedHit: HitValue = HitValue(shapeQueryValue(w,id),output.point,output.normal,output.fraction);
+        var response: f32 = frame.valueCast(savedHit,frame.context);
+        if (frame.collectMode == 2i32) { queryResults.at(index).closest = savedHit; queryResults.at(index).hit = true; worldFrames.at(index).fraction = output.fraction; return output.fraction; }
+        queryResults.at(index).hits.push(savedHit);
+        if (frame.collectMode == 1i32) { worldFrames.at(index).fraction = 0.0f32; return 0.0f32; }
+        if (0.0f32 <= response and response <= 1.0f32) worldFrames.at(index).fraction = response;
+        return response;
+    }
+    if (frame.closest) {
+        if (output.fraction == 0.0f32) return -1.0f32;
+        worldFrames.at(index).result = RayResult(id,output.point,output.normal,output.fraction,true,0i32,0i32);
+        worldFrames.at(index).fraction = output.fraction; return output.fraction;
+    }
+    let value: f32 = frame.cast(id,output.point,output.normal,output.fraction,frame.context);
+    if (0.0f32 <= value and value <= 1.0f32) worldFrames.at(index).fraction = value;
+    return value;
+}
+fun worldRayAdapter(input: ref local.RayCastInput, proxyId: i32, user: i64, token: Key64) -> f32 = {
+    let frame: WorldQueryFrame = worldFrames.at(token.low as i64);
+    var w: ref world.World = world.worlds.at(frame.slot as i64); var s: ref world.ShapeRecord = w.shapes.at(user);
+    if (not b2ShouldQueryCollide(s.filter,frame.filter)) return input.maxFraction;
+    if (frame.checked and not checkedCandidate(w,s,frame.checkedFilter)) return input.maxFraction;
+    let output: local.CastOutput = b2RayCastShape(input,s,shapeTransform(w,s));
+    if (not output.hit) return input.maxFraction;
+    return worldHit(token.low as i64,world.b2MakeShapeId(w,user as i32),output);
+}
+fun worldShapeAdapter(input: ref local.ShapeCastInput, proxyId: i32, user: i64, token: Key64) -> f32 = {
+    let frame: WorldQueryFrame = worldFrames.at(token.low as i64);
+    var w: ref world.World = world.worlds.at(frame.slot as i64); var s: ref world.ShapeRecord = w.shapes.at(user);
+    if (not b2ShouldQueryCollide(s.filter,frame.filter)) return input.maxFraction;
+    if (frame.checked and not checkedCandidate(w,s,frame.checkedFilter)) return input.maxFraction;
+    let output: local.CastOutput = b2ShapeCastShape(input,s,shapeTransform(w,s));
+    if (not output.hit) return input.maxFraction;
+    return worldHit(token.low as i64,world.b2MakeShapeId(w,user as i32),output);
+}
+fun makeAABB(proxy: ref distance.ShapeProxy) -> tree.AABB = {
+    var boxA = tree.AABB(proxy.points[0i32],proxy.points[0i32]); var i: i32 = 1i32;
+    while (i < proxy.count) { boxA.lowerBound = tree.b2Min(boxA.lowerBound,proxy.points[i]); boxA.upperBound = tree.b2Max(boxA.upperBound,proxy.points[i]); i += 1i32; }
+    let r = Vec2(proxy.radius,proxy.radius); boxA.lowerBound = b2Sub(boxA.lowerBound,r); boxA.upperBound = b2Add(boxA.upperBound,r); return boxA;
+}
+fun worldOverlap(id: world.WorldId, aabb: tree.AABB, frame: WorldQueryFrame) -> TreeStats = {
+    var stats = TreeStats(); var w: ref world.World = world.worlds.at((id.index1-1u16) as i64); if (not world.b2WorldUnlocked(w)) return stats;
+    if (asserts.B2_ENABLE_ASSERT and not frame.narrow) asserts.b2Assert(tree.b2IsValidAABB(aabb),"b2IsValidAABB( aabb )\0","world.c\0",2082i32);
+    let index: i32 = pushWorldFrame(frame); var i: i32 = 0i32;
+    while (i < 3i32) {
+        let part: TreeStats = b2DynamicTree_Query(&w.broadPhase.trees[i],aabb,frame.filter.maskBits,worldOverlapAdapter,Key64(index as u32,0u32));
+        stats.nodeVisits += part.nodeVisits; stats.leafVisits += part.leafVisits; i += 1i32;
+    }
+    worldDepth -= 1i32; return stats;
+}
+fun b2World_OverlapAABB(id: world.WorldId, aabb: tree.AABB, filter: QueryFilter, callback: funptr(broad.ShapeId,Key64) -> bool, context: Key64) -> TreeStats = {
+    var frame = WorldQueryFrame(); frame.slot = (id.index1-1u16) as i32; frame.filter = filter; frame.overlap = callback; frame.context = context;
+    return worldOverlap(id,aabb,frame);
+}
+fun b2World_OverlapShape(id: world.WorldId, proxy: ref distance.ShapeProxy, filter: QueryFilter, callback: funptr(broad.ShapeId,Key64) -> bool, context: Key64) -> TreeStats = {
+    var frame = WorldQueryFrame(); frame.slot = (id.index1-1u16) as i32; frame.filter = filter; frame.overlap = callback; frame.context = context; frame.proxy = proxy; frame.narrow = true;
+    return worldOverlap(id,makeAABB(proxy),frame);
+}
+fun worldCast(id: world.WorldId, ray: local.RayCastInput, shape: local.ShapeCastInput, shapeMode: bool, frame: WorldQueryFrame) -> RayResult = {
+    var result = RayResult(); var w: ref world.World = world.worlds.at((id.index1-1u16) as i64); if (not world.b2WorldUnlocked(w)) return result;
+    if (asserts.B2_ENABLE_ASSERT) {
+        if (not shapeMode) asserts.b2Assert(world.b2IsValidVec2(ray.origin),"b2IsValidVec2( origin )\0","world.c\0",2234i32);
+        let translation: Vec2 = if shapeMode then shape.translation else ray.translation;
+        asserts.b2Assert(world.b2IsValidVec2(translation),"b2IsValidVec2( translation )\0","world.c\0",2235i32);
+    }
+    let index: i32 = pushWorldFrame(frame); var i: i32 = 0i32; var rayInput = ray; var shapeInput = shape; var stopped: bool = false;
+    while (i < 3i32 and not stopped) {
+        var part = TreeStats();
+        if (shapeMode) part = b2DynamicTree_ShapeCast(&w.broadPhase.trees[i],&shapeInput,frame.filter.maskBits,worldShapeAdapter,Key64(index as u32,0u32));
+        else part = b2DynamicTree_RayCast(&w.broadPhase.trees[i],&rayInput,frame.filter.maskBits,worldRayAdapter,Key64(index as u32,0u32));
+        result.nodeVisits += part.nodeVisits; result.leafVisits += part.leafVisits;
+        let f: f32 = worldFrames.at(index as i64).fraction; stopped = f == 0.0f32; rayInput.maxFraction = f; shapeInput.maxFraction = f; i += 1i32;
+    }
+    let saved: RayResult = worldFrames.at(index as i64).result;
+    result.shapeId = saved.shapeId; result.point = saved.point; result.normal = saved.normal; result.fraction = saved.fraction; result.hit = saved.hit;
+    worldDepth -= 1i32; return result;
+}
+fun b2World_CastRay(id: world.WorldId, origin: Vec2, translation: Vec2, filter: QueryFilter, callback: funptr(broad.ShapeId,Vec2,Vec2,f32,Key64) -> f32, context: Key64) -> TreeStats = {
+    var frame = WorldQueryFrame(); frame.slot = (id.index1-1u16) as i32; frame.filter = filter; frame.cast = callback; frame.context = context;
+    let r: RayResult = worldCast(id,local.RayCastInput(origin,translation,1.0f32),local.ShapeCastInput(),false,frame); return TreeStats(r.nodeVisits,r.leafVisits);
+}
+fun b2World_CastShape(id: world.WorldId, proxy: ref distance.ShapeProxy, translation: Vec2, filter: QueryFilter, callback: funptr(broad.ShapeId,Vec2,Vec2,f32,Key64) -> f32, context: Key64) -> TreeStats = {
+    var frame = WorldQueryFrame(); frame.slot = (id.index1-1u16) as i32; frame.filter = filter; frame.cast = callback; frame.context = context;
+    let r: RayResult = worldCast(id,local.RayCastInput(),local.ShapeCastInput(proxy,translation,1.0f32,false),true,frame); return TreeStats(r.nodeVisits,r.leafVisits);
+}
+fun b2World_CastRayClosest(id: world.WorldId, origin: Vec2, translation: Vec2, filter: QueryFilter) -> RayResult = {
+    var frame = WorldQueryFrame(); frame.slot = (id.index1-1u16) as i32; frame.filter = filter; frame.closest = true;
+    return worldCast(id,local.RayCastInput(origin,translation,1.0f32),local.ShapeCastInput(),false,frame);
+}
+
+# No query arena. These records own the lifetime tickets
+# captured inside a live callback, and remain readable after WorldDestroy.
+class ShapeQueryValue {
+    id: broad.ShapeId = broad.ShapeId(); shape: game.ShapeNumber = game.ShapeNumber(0i32,Key64(),Key64()); body: game.BodyNumber = game.BodyNumber(0i32,Key64(),Key64());
+}
+class HitValue { shape: ShapeQueryValue = ShapeQueryValue(); point: Vec2 = Vec2(); normal: Vec2 = Vec2(); fraction: f32 = 0.0f32; }
+fun continueValueOverlap(value: ShapeQueryValue, context: Key64) -> bool = { return true; }
+fun continueValueCast(value: HitValue, context: Key64) -> f32 = { return 1.0f32; }
+class TreeQueryValue { proxyId: i32 = 0i32; userData: i64 = 0i64; }
+fun emptyQueryShapes() -> List[ShapeQueryValue] = { var values: List[ShapeQueryValue]; return values; }
+fun emptyQueryHits() -> List[HitValue] = { var values: List[HitValue]; return values; }
+fun emptyQueryTree() -> List[TreeQueryValue] = { var values: List[TreeQueryValue]; return values; }
+class CheckedQueryFilter {
+    raw: QueryFilter = QueryFilter(); bodyTypeBits: i32 = 7i32; includeSensors: i32 = 1i32;
+    hasExcludedBody: i32 = 0i32; excludedBody: game.BodyNumber = game.BodyNumber();
+    hasExcludedShape: i32 = 0i32; excludedShape: game.ShapeNumber = game.ShapeNumber();
+}
+
+# The public value filter. The existing integer description
+# remains available to the transport/preflight for invalid-enum diagnostics.
+class WorldQueryFilter {
+    categoryBits: Key64 = Key64(1u32,0u32); maskBits: Key64 = Key64(4294967295u32,4294967295u32);
+    bodyTypeBits: i32 = 7i32; includeSensors: bool = true;
+    hasExcludedBody: bool = false; excludedBody: game.BodyNumber = game.BodyNumber();
+    hasExcludedShape: bool = false; excludedShape: game.ShapeNumber = game.ShapeNumber();
+}
+fun checkFilter(filter: WorldQueryFilter) -> CheckedQueryFilter = {
+    var result = CheckedQueryFilter();
+    result.raw = QueryFilter(((filter.categoryBits.low as u64) | ((filter.categoryBits.high as u64) << 32u64)) as i64,
+        ((filter.maskBits.low as u64) | ((filter.maskBits.high as u64) << 32u64)) as i64);
+    result.bodyTypeBits = filter.bodyTypeBits; result.includeSensors = if filter.includeSensors then 1i32 else 0i32;
+    result.hasExcludedBody = if filter.hasExcludedBody then 1i32 else 0i32; result.excludedBody = filter.excludedBody;
+    result.hasExcludedShape = if filter.hasExcludedShape then 1i32 else 0i32; result.excludedShape = filter.excludedShape;
+    return result;
+}
+class QueryDescription {
+    opcode: i32 = 502i32; owner: game.WorldNumber = game.WorldNumber(); target: game.ShapeNumber = game.ShapeNumber();
+    filter: CheckedQueryFilter = CheckedQueryFilter(); aabb: tree.AABB = tree.AABB();
+    proxy: distance.ShapeProxy = distance.ShapeProxy(); point: Vec2 = Vec2(); translation: Vec2 = Vec2();
+    ray: local.RayCastInput = local.RayCastInput();
+    overlap: funptr(ShapeQueryValue,Key64) -> bool = continueValueOverlap;
+    cast: funptr(HitValue,Key64) -> f32 = continueValueCast; context: Key64 = Key64();
+}
+class QueryResult {
+    status: i32 = 0i32; reason: i32 = 0i32; stats: TreeStats = TreeStats(); executed: bool = false;
+    shapes: List[ShapeQueryValue] = emptyQueryShapes(); hits: List[HitValue] = emptyQueryHits();
+    treeValues: List[TreeQueryValue] = emptyQueryTree();
+    hit: bool = false; closest: HitValue = HitValue(); boolean: bool = false; point: Vec2 = Vec2(); cast: local.CastOutput = local.CastOutput();
+}
+fun shapeQueryValue(w: ref world.World, id: broad.ShapeId) -> ShapeQueryValue = {
+    var s: ref world.ShapeRecord = w.shapes.at((id.index1-1i32) as i64);
+    var b: ref world.BodyRecord = w.bodies.at(s.bodyId as i64);
+    return ShapeQueryValue(id,game.ShapeNumber(s.id,s.birthTicket,w.birthTicket),game.BodyNumber(b.id,b.birthTicket,w.birthTicket));
+}
+fun checkedCandidate(w: ref world.World, s: ref world.ShapeRecord, filter: CheckedQueryFilter) -> bool = {
+    if (s.isSensor and filter.includeSensors == 0i32) return false;
+    var b: ref world.BodyRecord = w.bodies.at(s.bodyId as i64);
+    if ((filter.bodyTypeBits & (1i32 << b.bodyType)) == 0i32) return false;
+    if (filter.hasExcludedBody != 0i32 and s.bodyId == filter.excludedBody.slot) return false;
+    if (filter.hasExcludedShape != 0i32 and s.id == filter.excludedShape.slot) return false;
+    return true;
+}
+fun finiteCast(value: local.CastOutput) -> bool = {
+    return local.finiteVector(value.point) and local.finiteVector(value.normal) and distance.finite(value.fraction);
+}
+fun queryDomain(opcode: i32, aabb: tree.AABB, proxy: ref distance.ShapeProxy, point: Vec2, translation: Vec2, ray: ref local.RayCastInput) -> distance.Validation = {
+    if (opcode == 502i32) {
+        if (not local.finiteVector(aabb.lowerBound) or not local.finiteVector(aabb.upperBound) or aabb.lowerBound.x > aabb.upperBound.x or aabb.lowerBound.y > aabb.upperBound.y) return distance.Validation(5i32,22i32);
+    }
+    if (opcode == 504i32 or opcode == 509i32 or opcode == 505i32) {
+        if (not local.finiteVector(translation)) return distance.Validation(5i32,22i32);
+    }
+    if (opcode == 504i32 or opcode == 509i32 or opcode == 506i32 or opcode == 508i32) {
+        if (not local.finiteVector(point)) return distance.Validation(5i32,22i32);
+    }
+    if (opcode == 507i32 and not local.b2IsValidRay(ray)) return distance.Validation(5i32,22i32);
+    if (opcode == 503i32 or opcode == 505i32) {
+        if (not distance.validRadius(proxy.radius)) return distance.Validation(5i32,22i32);
+        if (not distance.validProxyCount(proxy.count)) return distance.Validation(4i32,0i32);
+        if (not distance.validProxyPoints(&proxy.points,proxy.count)) return distance.Validation(4i32,0i32);
+    }
+    return distance.Validation();
+}
+# Public checked calls and GUARD call this exact helper; it never executes raw.
+fun queryPreflight(description: ref QueryDescription) -> distance.Validation = {
+    let owner: game.WorldNumber = description.owner; let op: i32 = description.opcode;
+    var status: i32 = game.worldStatus(owner); if (status != game.OK) return distance.Validation(status,0i32);
+    let readingShape: bool = op >= 506i32 and op <= 508i32;
+    if (readingShape) { status = game.shapeStatus(owner,description.target); if (status != game.OK) return distance.Validation(status,0i32); }
+    if (not readingShape and op != 510i32) {
+        if (description.filter.hasExcludedBody != 0i32) { status = game.bodyStatus(owner,description.filter.excludedBody); if (status != game.OK) return distance.Validation(status,0i32); }
+        if (description.filter.hasExcludedShape != 0i32) { status = game.shapeStatus(owner,description.filter.excludedShape); if (status != game.OK) return distance.Validation(status,0i32); }
+    }
+    if (not readingShape and world.worlds.at(owner.slot as i64).locked) return distance.Validation(7i32,1i32);
+    if (op < 502i32 or op > 510i32) return distance.Validation(5i32,22i32);
+    if (not readingShape and op != 510i32 and (description.filter.bodyTypeBits < 0i32 or description.filter.bodyTypeBits > 7i32 or description.filter.includeSensors < 0i32 or description.filter.includeSensors > 1i32 or description.filter.hasExcludedBody < 0i32 or description.filter.hasExcludedBody > 1i32 or description.filter.hasExcludedShape < 0i32 or description.filter.hasExcludedShape > 1i32)) return distance.Validation(5i32,22i32);
+    return queryDomain(op,description.aabb,&description.proxy,description.point,description.translation,&description.ray);
+}
+fun checkedQuery(description: ref QueryDescription, mode: i32 = 0i32) -> QueryResult = {
+    var result = QueryResult(); let gate: distance.Validation = queryPreflight(description);
+    result.status = gate.status; result.reason = gate.reason; if (gate.status != 0i32) return result;
+    result.executed = true;
+    let op: i32 = description.opcode; let owner: game.WorldNumber = description.owner;
+    var w: ref world.World = world.worlds.at(owner.slot as i64); let id = world.WorldId((owner.slot+1i32) as u16,w.generation);
+    if (op == 510i32) { b2World_RebuildStaticTree(id); return result; }
+    if (op >= 506i32 and op <= 508i32) {
+        let shapeId: broad.ShapeId = world.b2MakeShapeId(w,description.target.slot);
+        if (op == 506i32) result.boolean = b2Shape_TestPoint(shapeId,description.point);
+        if (op == 507i32) result.cast = b2Shape_RayCast(shapeId,&description.ray);
+        if (op == 508i32) result.point = b2Shape_GetClosestPoint(shapeId,description.point);
+        if (not finiteCast(result.cast) or not local.finiteVector(result.point)) { result = QueryResult(); result.status = 5i32; result.reason = 22i32; result.executed = true; }
+        return result;
+    }
+    var frame = WorldQueryFrame(); frame.slot = owner.slot; frame.filter = description.filter.raw;
+    frame.checked = true; frame.checkedFilter = description.filter; frame.collectMode = mode; frame.shapeClosest = op == 505i32;
+    frame.valueOverlap = description.overlap; frame.valueCast = description.cast; frame.context = description.context;
+    let index: i32 = worldDepth;
+    if (op == 502i32 or op == 503i32) {
+        var boxA: tree.AABB = description.aabb;
+        if (op == 503i32) { frame.proxy = description.proxy; frame.narrow = true; boxA = makeAABB(&description.proxy); }
+        result.stats = worldOverlap(id,boxA,frame);
+    } else {
+        let r: RayResult = worldCast(id,local.RayCastInput(description.point,description.translation,1.0f32),local.ShapeCastInput(description.proxy,description.translation,1.0f32,false),op == 505i32,frame);
+        result.stats = TreeStats(r.nodeVisits,r.leafVisits);
+    }
+    var collected: QueryResult = copy queryResults.at(index as i64);
+    if (collected.status != 0i32) { result = QueryResult(); result.status = collected.status; result.reason = collected.reason; result.executed = true; return result; }
+    let stats: TreeStats = result.stats; result = move collected; result.stats = stats; result.executed = true;
+    return result;
+}
+fun queryAABB(owner: game.WorldNumber, aabb: tree.AABB, filter: CheckedQueryFilter) -> QueryResult = {
+    var d = QueryDescription(); d.owner = owner; d.aabb = aabb; d.filter = filter; return checkedQuery(&d);
+}
+fun overlapShape(owner: game.WorldNumber, proxy: distance.ShapeProxy, filter: CheckedQueryFilter) -> QueryResult = {
+    var d = QueryDescription(); d.opcode = 503i32; d.owner = owner; d.proxy = proxy; d.filter = filter; return checkedQuery(&d);
+}
+fun castQuery(owner: game.WorldNumber, point: Vec2, translation: Vec2, proxy: distance.ShapeProxy, filter: CheckedQueryFilter, shapeMode: bool, mode: i32) -> QueryResult = {
+    var d = QueryDescription(); d.opcode = if shapeMode then 505i32 else 504i32; d.owner = owner; d.point = point; d.translation = translation; d.proxy = proxy; d.filter = filter;
+    return checkedQuery(&d,mode);
+}
+fun rayAll(owner: game.WorldNumber, origin: Vec2, translation: Vec2, filter: CheckedQueryFilter) -> QueryResult = { return castQuery(owner,origin,translation,distance.ShapeProxy(),filter,false,0i32); }
+fun rayAny(owner: game.WorldNumber, origin: Vec2, translation: Vec2, filter: CheckedQueryFilter) -> QueryResult = { return castQuery(owner,origin,translation,distance.ShapeProxy(),filter,false,1i32); }
+fun rayClosest(owner: game.WorldNumber, origin: Vec2, translation: Vec2, filter: CheckedQueryFilter) -> QueryResult = { return castQuery(owner,origin,translation,distance.ShapeProxy(),filter,false,2i32); }
+fun shapeAll(owner: game.WorldNumber, proxy: distance.ShapeProxy, translation: Vec2, filter: CheckedQueryFilter) -> QueryResult = { return castQuery(owner,Vec2(),translation,proxy,filter,true,0i32); }
+fun shapeAny(owner: game.WorldNumber, proxy: distance.ShapeProxy, translation: Vec2, filter: CheckedQueryFilter) -> QueryResult = { return castQuery(owner,Vec2(),translation,proxy,filter,true,1i32); }
+fun shapeClosest(owner: game.WorldNumber, proxy: distance.ShapeProxy, translation: Vec2, filter: CheckedQueryFilter) -> QueryResult = { return castQuery(owner,Vec2(),translation,proxy,filter,true,2i32); }
+fun shapeRead(owner: game.WorldNumber, number: game.ShapeNumber, opcode: i32, point: Vec2, ray: local.RayCastInput) -> QueryResult = {
+    var d = QueryDescription(); d.owner = owner; d.target = number; d.opcode = opcode; d.point = point; d.ray = ray; return checkedQuery(&d);
+}
+fun shapeTestPoint(owner: game.WorldNumber, number: game.ShapeNumber, point: Vec2) -> QueryResult = { return shapeRead(owner,number,506i32,point,local.RayCastInput()); }
+fun shapeRayCast(owner: game.WorldNumber, number: game.ShapeNumber, ray: local.RayCastInput) -> QueryResult = { return shapeRead(owner,number,507i32,Vec2(),ray); }
+fun shapeClosestPoint(owner: game.WorldNumber, number: game.ShapeNumber, point: Vec2) -> QueryResult = { return shapeRead(owner,number,508i32,point,local.RayCastInput()); }
+fun rebuildStaticTree(owner: game.WorldNumber) -> QueryResult = { var d = QueryDescription(); d.owner = owner; d.opcode = 510i32; return checkedQuery(&d); }
+
+class TreeQueryDescription {
+    kind: i32 = 0i32; mask: i64 = -1i64; aabb: tree.AABB = tree.AABB();
+    ray: local.RayCastInput = local.RayCastInput(); shape: local.ShapeCastInput = local.ShapeCastInput();
+}
+fun treeQueryPreflight(description: ref TreeQueryDescription) -> distance.Validation = {
+    let kind: i32 = description.kind;
+    if (kind < 0i32 or kind > 2i32) return distance.Validation(5i32,22i32);
+    if (kind == 0i32) return queryDomain(502i32,description.aabb,&description.shape.proxy,Vec2(),Vec2(),&description.ray);
+    if (kind == 1i32) { if (not local.b2IsValidRay(&description.ray)) return distance.Validation(5i32,22i32); return distance.Validation(); }
+    if (not distance.finite(description.shape.maxFraction) or description.shape.maxFraction < 0.0f32) return distance.Validation(5i32,22i32);
+    return queryDomain(505i32,description.aabb,&description.shape.proxy,Vec2(),description.shape.translation,&description.ray);
+}
+fun collectTreeQuery(proxyId: i32, user: i64, context: Key64) -> bool = {
+    queryResults.at(context.low as i64).treeValues.push(TreeQueryValue(proxyId,user)); return true;
+}
+fun collectTreeRay(input: ref local.RayCastInput, proxyId: i32, user: i64, context: Key64) -> f32 = {
+    collectTreeQuery(proxyId,user,context); return 1.0f32;
+}
+fun collectTreeShape(input: ref local.ShapeCastInput, proxyId: i32, user: i64, context: Key64) -> f32 = {
+    collectTreeQuery(proxyId,user,context); return 1.0f32;
+}
+fun checkedTreeQuery(t: ref tree.DynamicTree, description: ref TreeQueryDescription) -> QueryResult = {
+    var result = QueryResult(); let gate: distance.Validation = treeQueryPreflight(description);
+    result.status = gate.status; result.reason = gate.reason; if (gate.status != 0i32) return result;
+    result.executed = true;
+    let index: i32 = pushWorldFrame(WorldQueryFrame()); let context = Key64(index as u32,0u32);
+    if (description.kind == 0i32) result.stats = b2DynamicTree_Query(t,description.aabb,description.mask,collectTreeQuery,context);
+    if (description.kind == 1i32) result.stats = b2DynamicTree_RayCast(t,&description.ray,description.mask,collectTreeRay,context);
+    if (description.kind == 2i32) result.stats = b2DynamicTree_ShapeCast(t,&description.shape,description.mask,collectTreeShape,context);
+    result.treeValues = copy queryResults.at(index as i64).treeValues; worldDepth -= 1i32; return result;
+}

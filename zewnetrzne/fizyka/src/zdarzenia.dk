@@ -1,0 +1,260 @@
+# Owned event copies and commands after each successful step.
+# Physics and lifetime validation belong exclusively to the public gra API.
+import fizyka.gra as game;
+import fizyka.start as start;
+import fizyka.kola.*;
+import fizyka.zbior.*;
+
+const SENSOR_BEGIN: i32 = 1i32;
+const SENSOR_END: i32 = 2i32;
+const CONTACT_BEGIN: i32 = 3i32;
+const CONTACT_END: i32 = 4i32;
+const CONTACT_HIT: i32 = 5i32;
+const OBJECT_REMOVED: i32 = 6i32;
+const DOOR_OPENED: i32 = 7i32;
+const REMOVE_OBJECT: i32 = 1i32;
+const OPEN_DOOR: i32 = 2i32;
+
+class GameEvent {
+    kind: i32 = 0i32; stepIndex: i64 = 0i64;
+    shapeA: game.ShapeNumber = game.ShapeNumber();
+    shapeB: game.ShapeNumber = game.ShapeNumber();
+    body: game.BodyNumber = game.BodyNumber();
+    manifold: Manifold = Manifold();
+    point: Vec2 = Vec2(); normal: Vec2 = Vec2(); approachSpeed: f32 = 0.0f32;
+}
+fun emptyGameEvents() -> List[GameEvent] = { var values: List[GameEvent]; return values; }
+class EventBatch {
+    status: i32 = game.STALE; reason: i32 = 0i32;
+    stepIndex: i64 = 0i64; values: List[GameEvent] = emptyGameEvents();
+}
+class EventAction {
+    status: i32 = game.OK; reason: i32 = 0i32; queued: bool = false;
+}
+class EventCommand {
+    kind: i32 = 0i32; body: game.BodyNumber = game.BodyNumber();
+}
+fun emptyEventCommands() -> List[EventCommand] = { var values: List[EventCommand]; return values; }
+class EventCommands {
+    status: i32 = game.STALE; reason: i32 = 0i32;
+    values: List[EventCommand] = emptyEventCommands();
+}
+class AppliedEvents {
+    status: i32 = game.STALE; reason: i32 = 0i32;
+    applied: i32 = 0i32; values: List[GameEvent] = emptyGameEvents();
+}
+class EventQueue {
+    world: game.WorldNumber = game.WorldNumber();
+    seenStep: i64 = 0i64; phase: i32 = 0i32; maxCommands: i32 = 256i32;
+    pending: List[EventCommand] = emptyEventCommands();
+}
+class EventQueueResult {
+    status: i32 = game.STALE; reason: i32 = 0i32;
+    value: EventQueue = EventQueue();
+}
+
+fun bindEvents(session: ref start.GameSession, maxCommands: i32 = 256i32) -> EventQueueResult = {
+    var result = EventQueueResult();
+    result.status = game.worldMutationStatus(session.world);
+    if (result.status != game.OK) {
+        if (result.status == game.LOCKED) result.reason = 1i32;
+        return result;
+    }
+    if (maxCommands < 1i32 or maxCommands > 65535i32)
+        return EventQueueResult(game.PARAM, 2106i32);
+    result.value.world = session.world;
+    result.value.seenStep = session.stepIndex;
+    result.value.maxCommands = maxCommands;
+    return result;
+}
+
+# No read of event buffers precedes this shared world/owner/phase/step check.
+fun queuePreflight(session: ref start.GameSession, queue: ref EventQueue, phase: i32) -> EventAction = {
+    let status: i32 = game.worldMutationStatus(queue.world);
+    if (status != game.OK)
+        return EventAction(status, if status == game.LOCKED then 1i32 else 0i32);
+    if (queue.world.slot != session.world.slot
+        or not equalKey(queue.world.birthTicket, session.world.birthTicket))
+        return EventAction(game.FOREIGN);
+    if (queue.phase != phase) return EventAction(game.PARAM, 2101i32);
+    if (phase == 0i32) {
+        if (queue.seenStep == 9223372036854775807i64) return EventAction(game.LIMIT);
+        if (session.stepIndex != queue.seenStep + 1i64) return EventAction(game.PARAM, 2103i32);
+    } else {
+        if (session.stepIndex != queue.seenStep) return EventAction(game.PARAM, 2103i32);
+    }
+    return EventAction();
+}
+
+fun captureAfterStep(session: ref start.GameSession, queue: ref EventQueue) -> EventBatch = {
+    let check = queuePreflight(session, queue, 0i32);
+    if (check.status != game.OK) return EventBatch(check.status, check.reason);
+    var sensors = game.copySensorEvents(queue.world);
+    if (sensors.status != game.OK) return EventBatch(sensors.status, sensors.reason);
+    var contacts = game.copyContactEvents(queue.world);
+    if (contacts.status != game.OK) return EventBatch(contacts.status);
+    var result = EventBatch(game.OK, 0i32, session.stepIndex);
+    var i: i64 = 0i64;
+    while (i < sensors.beginEvents.length()) {
+        let source: game.SensorTouch = sensors.beginEvents.at(i);
+        var event = GameEvent(SENSOR_BEGIN, session.stepIndex, source.sensor, source.visitor);
+        result.values.push(event); i = i + 1i64;
+    }
+    var j: i64 = 0i64;
+    while (j < sensors.endEvents.length()) {
+        let sourceEnd: game.SensorTouch = sensors.endEvents.at(j);
+        var eventEnd = GameEvent(SENSOR_END, session.stepIndex, sourceEnd.sensor, sourceEnd.visitor);
+        result.values.push(eventEnd); j = j + 1i64;
+    }
+    var k: i64 = 0i64;
+    while (k < contacts.begin.length()) {
+        let begin: game.ContactBegin = contacts.begin.at(k);
+        var contactBegin = GameEvent(CONTACT_BEGIN, session.stepIndex, begin.shapeA, begin.shapeB);
+        contactBegin.manifold = begin.manifold;
+        result.values.push(contactBegin); k = k + 1i64;
+    }
+    var m: i64 = 0i64;
+    while (m < contacts.end.length()) {
+        let ended: game.ContactEnd = contacts.end.at(m);
+        var contactEnd = GameEvent(CONTACT_END, session.stepIndex, ended.shapeA, ended.shapeB);
+        result.values.push(contactEnd); m = m + 1i64;
+    }
+    var n: i64 = 0i64;
+    while (n < contacts.hits.length()) {
+        let hit: game.ContactHit = contacts.hits.at(n);
+        var contactHit = GameEvent(CONTACT_HIT, session.stepIndex, hit.shapeA, hit.shapeB);
+        contactHit.point = hit.point; contactHit.normal = hit.normal; contactHit.approachSpeed = hit.approachSpeed;
+        result.values.push(contactHit); n = n + 1i64;
+    }
+    queue.seenStep = session.stepIndex; queue.phase = 1i32;
+    return result;
+}
+
+fun sameBody(a: game.BodyNumber, b: game.BodyNumber) -> bool = {
+    return a.slot == b.slot and equalKey(a.birthTicket, b.birthTicket)
+        and equalKey(a.ownerTicket, b.ownerTicket);
+}
+
+fun doorPreflight(owner: game.WorldNumber, body: game.BodyNumber) -> EventAction = {
+    let view = game.lookupBody(owner, body);
+    if (view.status != game.OK) return EventAction(view.status);
+    if (view.value.bodyType != 0i32) return EventAction(game.PARAM, 2104i32);
+    var joints = game.bodyJoints(owner, body);
+    if (joints.status != game.OK) return EventAction(joints.status, joints.reason);
+    if (joints.values.length() != 0i64) return EventAction(game.PARAM, 2105i32);
+    # queued here only conveys whether a static door still needs disabling.
+    return EventAction(game.OK, 0i32, view.value.isEnabled);
+}
+
+fun enqueueAfterStep(session: ref start.GameSession, queue: ref EventQueue,
+    body: game.BodyNumber, kind: i32) -> EventAction = {
+    let check = queuePreflight(session, queue, 1i32);
+    if (check.status != game.OK) return check;
+    let status: i32 = game.bodyMutationStatus(queue.world, body);
+    if (status != game.OK)
+        return EventAction(status, if status == game.LOCKED then 1i32 else 0i32);
+    var index: i64 = 0i64;
+    while (index < queue.pending.length()) {
+        if (sameBody(queue.pending.at(index).body, body)) return EventAction(game.PARAM, 2102i32);
+        index = index + 1i64;
+    }
+    if (kind == OPEN_DOOR) {
+        let door = doorPreflight(queue.world, body);
+        if (door.status != game.OK or not door.queued) return door;
+    }
+    if (queue.pending.length() >= (queue.maxCommands as i64)) return EventAction(game.LIMIT);
+    queue.pending.push(EventCommand(kind, body));
+    return EventAction(game.OK, 0i32, true);
+}
+
+fun removeAfterStep(session: ref start.GameSession, queue: ref EventQueue,
+    body: game.BodyNumber) -> EventAction = {
+    return enqueueAfterStep(session, queue, body, REMOVE_OBJECT);
+}
+fun openDoorAfterStep(session: ref start.GameSession, queue: ref EventQueue,
+    body: game.BodyNumber) -> EventAction = {
+    return enqueueAfterStep(session, queue, body, OPEN_DOOR);
+}
+fun copyPendingCommands(session: ref start.GameSession, queue: ref EventQueue) -> EventCommands = {
+    let check = queuePreflight(session, queue, 1i32);
+    if (check.status != game.OK) return EventCommands(check.status, check.reason);
+    var result = EventCommands(game.OK); result.values = copy queue.pending;
+    return result;
+}
+
+fun applyAfterStep(session: ref start.GameSession, queue: ref EventQueue) -> AppliedEvents = {
+    let check = queuePreflight(session, queue, 1i32);
+    if (check.status != game.OK) return AppliedEvents(check.status, check.reason);
+    var index: i64 = 0i64;
+    while (index < queue.pending.length()) {
+        let command: EventCommand = queue.pending.at(index);
+        let status: i32 = game.bodyMutationStatus(queue.world, command.body);
+        if (status != game.OK)
+            return AppliedEvents(status, if status == game.LOCKED then 1i32 else 0i32);
+        if (command.kind == OPEN_DOOR) {
+            let door = doorPreflight(queue.world, command.body);
+            if (door.status != game.OK) return AppliedEvents(door.status, door.reason);
+        }
+        index = index + 1i64;
+    }
+    var result = AppliedEvents(game.OK);
+    var appliedIndex: i64 = 0i64;
+    while (appliedIndex < queue.pending.length() and result.status == game.OK) {
+        let next: EventCommand = queue.pending.at(appliedIndex);
+        if (next.kind == REMOVE_OBJECT) result.status = game.destroyBody(queue.world, next.body);
+        else result.status = game.setEnabled(queue.world, next.body, false);
+        if (result.status == game.OK) {
+            var effect = GameEvent(); effect.stepIndex = queue.seenStep; effect.body = next.body;
+            effect.kind = if next.kind == REMOVE_OBJECT then OBJECT_REMOVED else DOOR_OPENED;
+            result.values.push(effect); result.applied = result.applied + 1i32;
+            appliedIndex = appliedIndex + 1i64;
+        }
+    }
+    if (result.status == game.OK) {
+        queue.pending.clear(); queue.phase = 0i32;
+    } else {
+        if (result.status == game.LOCKED) result.reason = 1i32;
+        # Preserve the real, unexecuted suffix; never claim rollback of physics.
+        var remaining: List[EventCommand];
+        var suffix: i64 = appliedIndex;
+        while (suffix < queue.pending.length()) {
+            let saved: EventCommand = queue.pending.at(suffix);
+            remaining.push(saved); suffix = suffix + 1i64;
+        }
+        queue.pending = move remaining;
+    }
+    return result;
+}
+
+fun cancelAfterStep(session: ref start.GameSession, queue: ref EventQueue) -> EventAction = {
+    let check = queuePreflight(session, queue, 1i32);
+    if (check.status != game.OK) return check;
+    queue.pending.clear(); queue.phase = 0i32;
+    return EventAction();
+}
+fun eventName(kind: i32) -> str = {
+    if (kind == SENSOR_BEGIN) return "SENSOR_BEGIN";
+    if (kind == SENSOR_END) return "SENSOR_END";
+    if (kind == CONTACT_BEGIN) return "CONTACT_BEGIN";
+    if (kind == CONTACT_END) return "CONTACT_END";
+    if (kind == CONTACT_HIT) return "CONTACT_HIT";
+    if (kind == OBJECT_REMOVED) return "OBJECT_REMOVED";
+    if (kind == DOOR_OPENED) return "DOOR_OPENED";
+    return "UNKNOWN";
+}
+fun eventMessage(status: i32, reason: i32) -> str = {
+    if (status == game.OK) return "OK";
+    if (status == game.LOCKED and reason == 1i32) return "EVENTS: WORLD_LOCKED";
+    if (status == game.STALE and reason == 0i32) return "EVENTS: STALE";
+    if (status == game.FOREIGN and reason == 0i32) return "EVENTS: FOREIGN";
+    if (status == game.LIMIT and reason == 0i32) return "EVENTS: LIMIT";
+    if (status == game.PARAM) {
+        if (reason == 2101i32) return "EVENTS: EVENT_PHASE";
+        if (reason == 2102i32) return "EVENTS: DUPLICATE_COMMAND";
+        if (reason == 2103i32) return "EVENTS: STEP_SEQUENCE";
+        if (reason == 2104i32) return "EVENTS: DOOR_TYPE";
+        if (reason == 2105i32) return "EVENTS: DOOR_JOINT";
+        if (reason == 2106i32) return "EVENTS: SETTINGS";
+    }
+    return "EVENTS: API";
+}

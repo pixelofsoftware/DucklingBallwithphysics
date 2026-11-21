@@ -1,0 +1,245 @@
+# Six ready-made constructions based on Box2D 3.1.1 samples.
+import fizyka.gra as game;
+import fizyka.swiat as defs;
+import fizyka.ruch as mass2;
+import fizyka.rysowanie.makeRot as makeRot;
+import fizyka.kola.*;
+import fizyka.zbior.Key64 as Key64;
+
+const BRIDGE: i32 = 1i32;
+const SPRING: i32 = 2i32;
+const SUSPENSION: i32 = 3i32;
+const RUBBER_BALL: i32 = 4i32;
+const ICE: i32 = 5i32;
+const CONVEYOR: i32 = 6i32;
+
+fun emptyRecipeBodies() -> List[game.BodyNumber] = { var values: List[game.BodyNumber]; return values; }
+fun emptyRecipeShapes() -> List[game.ShapeNumber] = { var values: List[game.ShapeNumber]; return values; }
+fun emptyRecipeJoints() -> List[game.JointNumber] = { var values: List[game.JointNumber]; return values; }
+class RecipeOptions {
+    densityScale: f32 = 1.0f32;
+    initialVelocity: Vec2 = Vec2();
+    angularVelocity: f32 = 0.0f32;
+}
+class RecipeCheck { status: i32 = game.OK; reason: i32 = 0i32; }
+class RecipeResult {
+    status: i32 = game.STALE;
+    reason: i32 = 0i32;
+    bodies: List[game.BodyNumber] = emptyRecipeBodies();
+    shapes: List[game.ShapeNumber] = emptyRecipeShapes();
+    joints: List[game.JointNumber] = emptyRecipeJoints();
+}
+
+# Pure descriptions, shared by mass preflight and construction.
+fun recipeBox(hx: f32, hy: f32, center: Vec2 = Vec2(), angle: f32 = 0.0f32, radius: f32 = 0.0f32) -> defs.ShapeRecord = {
+    var shape = defs.ShapeRecord(); shape.shapeType = 3i32;
+    shape.polygon = mass2.b2MakeOffsetRoundedBox(hx,hy,center,makeRot(angle),radius);
+    return shape;
+}
+fun recipeDynamicShape(kind: i32, index: i32, scale: f32) -> defs.ShapeRecord = {
+    var shape = defs.ShapeRecord();
+    if (kind == BRIDGE) {
+        if (index < 16i32) shape = recipeBox(0.5f32,0.125f32);
+        else if (index < 18i32) {
+            shape.shapeType = 3i32; shape.polygon.count = 3i32;
+            shape.polygon.vertices[0] = Vec2(-0.5f32,0.0f32);
+            shape.polygon.vertices[1] = Vec2(0.5f32,0.0f32);
+            shape.polygon.vertices[2] = Vec2(0.0f32,1.5f32);
+            defs.b2MakePolygon(&shape.polygon);
+        } else shape = game.circleShape(0.5f32,1.0f32);
+    } else if (kind == SPRING) shape = game.circleShape(0.25f32,1.0f32);
+    else if (kind == SUSPENSION) {
+        shape.shapeType = 1i32;
+        shape.capsule = defs.Capsule(Vec2(0.0f32,-0.5f32),Vec2(0.0f32,0.5f32),0.5f32);
+    } else if (kind == RUBBER_BALL) {
+        shape = game.circleShape(0.5f32,1.0f32); shape.restitution = 1.0f32;
+    } else {
+        shape = recipeBox(0.5f32,0.5f32);
+        if (kind == ICE) {
+            if (index == 0i32) shape.friction = 0.75f32;
+            else if (index == 1i32) shape.friction = 0.5f32;
+            else if (index == 2i32) shape.friction = 0.35f32;
+            else if (index == 3i32) shape.friction = 0.1f32;
+            else shape.friction = 0.0f32;
+        }
+    }
+    let baseDensity: f32 = if kind == BRIDGE or kind == SPRING then 20.0f32 else (if kind == ICE then 25.0f32 else 1.0f32);
+    shape.density = baseDensity*scale;
+    return shape;
+}
+fun recipeDynamicCount(kind: i32) -> i32 = {
+    if (kind == BRIDGE) return 21i32;
+    if (kind == ICE or kind == CONVEYOR) return 5i32;
+    return 1i32;
+}
+fun validateRecipe(kind: i32, options: RecipeOptions = RecipeOptions()) -> RecipeCheck = {
+    if (kind < BRIDGE or kind > CONVEYOR) return RecipeCheck(game.PARAM,4104i32);
+    if (not game.finite(options.densityScale) or options.densityScale <= 0.0f32) return RecipeCheck(game.PARAM,4101i32);
+    var i: i32 = 0i32;
+    while (i < recipeDynamicCount(kind)) {
+        var shape = recipeDynamicShape(kind,i,options.densityScale);
+        if (not game.finite(shape.density)) return RecipeCheck(game.PARAM,4101i32);
+        var data = mass2.MassData();
+        if (shape.shapeType == 0i32) data = mass2.b2ComputeCircleMass(&shape.circle,shape.density);
+        else if (shape.shapeType == 1i32) data = defs.b2ComputeCapsuleMass(&shape.capsule,shape.density);
+        else data = mass2.b2ComputePolygonMass(&shape.polygon,shape.density);
+        if (not game.finite(data.mass) or not game.finite(data.rotationalInertia)
+            or data.mass < 0.1f32 or data.mass > 100.0f32) return RecipeCheck(game.PARAM,4101i32);
+        i = i+1i32;
+    }
+    let v: Vec2 = options.initialVelocity;
+    if (not game.finiteVector(v) or v.x*v.x+v.y*v.y > 2500.0f32
+        or not game.finite(options.angularVelocity) or options.angularVelocity < -20.0f32
+        or options.angularVelocity > 20.0f32) return RecipeCheck(game.PARAM,4102i32);
+    return RecipeCheck();
+}
+fun recipeMessage(status: i32, reason: i32) -> str = {
+    if (status == game.OK) return "OK";
+    if (status == game.PARAM) {
+        if (reason == 4101i32) return "RECIPE: MASS_RANGE";
+        if (reason == 4102i32) return "RECIPE: SPEED_RANGE";
+        if (reason == 4103i32) return "RECIPE: WORLD_NOT_EMPTY";
+        if (reason == 4104i32) return "RECIPE: RECIPE_KIND";
+    }
+    return "RECIPE: API";
+}
+
+fun recipePair(owner: game.WorldNumber, result: ref RecipeResult, body: defs.BodyDef, shape: defs.ShapeRecord) -> () = {
+    if (result.status != game.OK) return;
+    # Our polygons are already prepared by the pure constructors.
+    # The ordered-hull entry would rebuild their normals/centroid.
+    var pair = game.PairResult();
+    if (shape.shapeType == 3i32) pair = game.createBodyWithPreparedShape(owner,body,shape,true,false,Key64());
+    else pair = game.createBodyWithShape(owner,body,shape,true,false,Key64());
+    result.status = pair.status; result.reason = pair.sensorReason;
+    if (pair.status != game.OK) return;
+    result.bodies.push(pair.body.number); result.shapes.push(pair.shape.number);
+}
+fun recipeJoint(result: ref RecipeResult, joint: game.JointResult) -> () = {
+    result.status = joint.status; result.reason = joint.reason;
+    if (joint.status == game.OK) result.joints.push(joint.number);
+}
+fun recipeHinge(owner: game.WorldNumber, result: ref RecipeResult, a: game.BodyNumber, b: game.BodyNumber, pivot: Vec2) -> () = {
+    if (result.status != game.OK) return;
+    let localA = game.getLocalPoint(owner,a,pivot);
+    if (localA.status != game.OK) { result.status = localA.status; result.reason = 0i32; return; }
+    let localB = game.getLocalPoint(owner,b,pivot);
+    if (localB.status != game.OK) { result.status = localB.status; result.reason = 0i32; return; }
+    var joint = game.RevoluteDescription(); joint.localAnchorA = localA.value; joint.localAnchorB = localB.value;
+    joint.enableMotor = true; joint.maxMotorTorque = 200.0f32;
+    joint.enableSpring = true; joint.hertz = 2.0f32; joint.dampingRatio = 0.7f32;
+    recipeJoint(result,game.createRevoluteJoint(owner,a,b,joint));
+}
+fun recipeDynamicBody(kind: i32, index: i32, options: RecipeOptions) -> defs.BodyDef = {
+    var body = defs.BodyDef(); body.bodyType = 2i32;
+    body.linearVelocity = options.initialVelocity; body.angularVelocity = options.angularVelocity;
+    if (kind == BRIDGE) {
+        if (index < 16i32) {
+            body.position = Vec2(-8.0f32+0.5f32+1.0f32*(index as f32),20.0f32);
+            body.linearDamping = 0.1f32; body.angularDamping = 0.1f32;
+        } else if (index < 18i32) body.position = Vec2(-8.0f32+8.0f32*((index-16i32) as f32),22.0f32);
+        else body.position = Vec2(-6.0f32+6.0f32*((index-18i32) as f32),25.0f32);
+    } else if (kind == SPRING) { body.position = Vec2(1.0f32,20.0f32); body.angularDamping = 0.1f32; }
+    else if (kind == SUSPENSION) body.position = Vec2(0.0f32,10.25f32);
+    else if (kind == RUBBER_BALL) body.position = Vec2(0.0f32,40.0f32);
+    else if (kind == ICE) body.position = Vec2(-15.0f32+4.0f32*(index as f32),28.0f32);
+    else body.position = Vec2(-10.0f32+2.0f32*(index as f32),7.0f32);
+    return body;
+}
+fun recipeGroundShape(kind: i32) -> defs.ShapeRecord = {
+    var shape = defs.ShapeRecord(); shape.shapeType = 2i32;
+    let extent: f32 = if kind == CONVEYOR then 20.0f32 else 40.0f32;
+    shape.segment = defs.Segment(Vec2(-extent,0.0f32),Vec2(extent,0.0f32));
+    if (kind == ICE) shape.friction = 0.2f32;
+    return shape;
+}
+fun recipeIceRamp(index: i32) -> defs.ShapeRecord = {
+    var shape = defs.ShapeRecord();
+    if (index == 0i32) shape = recipeBox(13.0f32,0.25f32,Vec2(-4.0f32,22.0f32),-0.25f32);
+    else if (index == 1i32) shape = recipeBox(0.25f32,1.0f32,Vec2(10.5f32,19.0f32));
+    else if (index == 2i32) shape = recipeBox(13.0f32,0.25f32,Vec2(4.0f32,14.0f32),0.25f32);
+    else if (index == 3i32) shape = recipeBox(0.25f32,1.0f32,Vec2(-10.5f32,11.0f32));
+    else shape = recipeBox(13.0f32,0.25f32,Vec2(-4.0f32,6.0f32),-0.25f32);
+    shape.friction = 0.2f32; return shape;
+}
+fun recipeSuspensionJoint(owner: game.WorldNumber, result: ref RecipeResult, ground: game.BodyNumber, body: game.BodyNumber) -> () = {
+    let localA = game.getLocalPoint(owner,ground,Vec2(0.0f32,10.0f32));
+    if (localA.status != game.OK) { result.status = localA.status; result.reason = 0i32; return; }
+    let localB = game.getLocalPoint(owner,body,Vec2(0.0f32,10.0f32));
+    if (localB.status != game.OK) { result.status = localB.status; result.reason = 0i32; return; }
+    let axis = game.getLocalVector(owner,ground,mass2.b2Normalize(Vec2(1.0f32,1.0f32)));
+    if (axis.status != game.OK) { result.status = axis.status; result.reason = 0i32; return; }
+    var joint = game.WheelDescription(); joint.localAnchorA = localA.value; joint.localAnchorB = localB.value;
+    joint.localAxisA = axis.value; joint.enableLimit = true; joint.lowerTranslation = -3.0f32; joint.upperTranslation = 3.0f32;
+    joint.enableMotor = true; joint.motorSpeed = 2.0f32; joint.maxMotorTorque = 5.0f32;
+    recipeJoint(result,game.createWheelJoint(owner,ground,body,joint));
+}
+fun recipeSpringJoint(owner: game.WorldNumber, result: ref RecipeResult, ground: game.BodyNumber, body: game.BodyNumber) -> () = {
+    let localA = game.getLocalPoint(owner,ground,Vec2(0.0f32,20.0f32));
+    if (localA.status != game.OK) { result.status = localA.status; result.reason = 0i32; return; }
+    let localB = game.getLocalPoint(owner,body,Vec2(1.0f32,20.0f32));
+    if (localB.status != game.OK) { result.status = localB.status; result.reason = 0i32; return; }
+    var joint = game.DistanceDescription(); joint.localAnchorA = localA.value; joint.localAnchorB = localB.value;
+    joint.minLength = 1.0f32; joint.maxLength = 1.0f32; joint.enableSpring = true; joint.hertz = 2.0f32; joint.dampingRatio = 0.5f32;
+    recipeJoint(result,game.createDistanceJoint(owner,ground,body,joint));
+}
+fun createRecipe(owner: game.WorldNumber, kind: i32, options: RecipeOptions) -> RecipeResult = {
+    let status: i32 = game.worldMutationStatus(owner);
+    if (status != game.OK) return RecipeResult(status);
+    let world = game.lookupWorld(owner);
+    if (world.status != game.OK) return RecipeResult(world.status);
+    if (world.value.bodyCount != 0i32 or world.value.shapeCount != 0i32) return RecipeResult(game.PARAM,4103i32);
+    let check = validateRecipe(kind,options);
+    if (check.status != game.OK) return RecipeResult(check.status,check.reason);
+    var result = RecipeResult(game.OK);
+    if (kind <= SUSPENSION) {
+        let created = game.createBody(owner,defs.BodyDef());
+        if (created.status != game.OK) return RecipeResult(created.status);
+        result.bodies.push(created.number);
+    } else recipePair(owner,&result,defs.BodyDef(),recipeGroundShape(kind));
+    if (result.status != game.OK) return result;
+    let ground: game.BodyNumber = result.bodies.at(0i64);
+    if (kind == ICE) {
+        var ramp: i32 = 0i32;
+        while (ramp < 5i32 and result.status == game.OK) {
+            let added = game.addPreparedShape(owner,ground,recipeIceRamp(ramp),true);
+            result.status = added.status; result.reason = added.sensorReason;
+            if (added.status == game.OK) result.shapes.push(added.number);
+            ramp = ramp+1i32;
+        }
+    } else if (kind == CONVEYOR) {
+        var platform = defs.BodyDef(); platform.position = Vec2(-5.0f32,5.0f32);
+        var belt = recipeBox(10.0f32,0.25f32,Vec2(),0.0f32,0.25f32); belt.friction = 0.8f32; belt.tangentSpeed = 2.0f32;
+        recipePair(owner,&result,platform,belt);
+    }
+    var previous: game.BodyNumber = ground;
+    var i: i32 = 0i32;
+    while (i < recipeDynamicCount(kind) and result.status == game.OK) {
+        recipePair(owner,&result,recipeDynamicBody(kind,i,options),recipeDynamicShape(kind,i,options.densityScale));
+        if (result.status == game.OK) {
+            let body: game.BodyNumber = result.bodies.at(result.bodies.length()-1i64);
+            if (kind == BRIDGE and i < 16i32) {
+                recipeHinge(owner,&result,previous,body,Vec2(-8.0f32+1.0f32*(i as f32),20.0f32));
+                previous = body;
+                if (i == 15i32 and result.status == game.OK) recipeHinge(owner,&result,body,ground,Vec2(8.0f32,20.0f32));
+            } else if (kind == SPRING) recipeSpringJoint(owner,&result,ground,body);
+            else if (kind == SUSPENSION) recipeSuspensionJoint(owner,&result,ground,body);
+        }
+        i = i+1i32;
+    }
+    if (result.status == game.OK) return result;
+    # Only our bodies, reverse order. Public destroy also removes shapes/joints.
+    var remaining: i64 = result.bodies.length();
+    while (remaining > 0i64) {
+        remaining = remaining-1i64;
+        let number: game.BodyNumber = result.bodies.at(remaining);
+        game.destroyBody(owner,number);
+    }
+    return RecipeResult(result.status,result.reason);
+}
+fun createBridge(owner: game.WorldNumber, options: RecipeOptions = RecipeOptions()) -> RecipeResult = { return createRecipe(owner,BRIDGE,options); }
+fun createSpring(owner: game.WorldNumber, options: RecipeOptions = RecipeOptions()) -> RecipeResult = { return createRecipe(owner,SPRING,options); }
+fun createSuspension(owner: game.WorldNumber, options: RecipeOptions = RecipeOptions()) -> RecipeResult = { return createRecipe(owner,SUSPENSION,options); }
+fun createRubberBall(owner: game.WorldNumber, options: RecipeOptions = RecipeOptions()) -> RecipeResult = { return createRecipe(owner,RUBBER_BALL,options); }
+fun createIce(owner: game.WorldNumber, options: RecipeOptions = RecipeOptions()) -> RecipeResult = { return createRecipe(owner,ICE,options); }
+fun createConveyor(owner: game.WorldNumber, options: RecipeOptions = RecipeOptions()) -> RecipeResult = { return createRecipe(owner,CONVEYOR,options); }
