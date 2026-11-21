@@ -29,9 +29,20 @@ Do tego pomysł ze slajdu „Grawitacja”: klawisz, który odwraca grawitację.
 Wymagania:
 * Duckling z `duck` w PATH (sprawdzone na `duckc 0.3-alpha (83882805a 2026-11-20)`, macOS 27.2, Apple Silicon);
 * Xcode Command Line Tools (git, make, clang);
-* repozytorium [duckling-biblioteki](https://github.com/andr729/duckling-biblioteki), gałąź `paczki-duck`, domyślnie w `~/duckling-biblioteki` (inna ścieżka: `./przygotuj_macos.sh /ścieżka`).
+* nic więcej: pakiety `grafika` i `fizyka` oraz raylib dla macOS (Apple Silicon) są w katalogu `zewnetrzne/` (opis: [zewnetrzne/README.md](zewnetrzne/README.md)), więc nie trzeba pobierać duckling-biblioteki ani budować raylib;
 
 Pierwsza budowa z fizyką trwa około pół minuty, kolejne kilka sekund. Kompilator wypisuje przy fizyce dużo ostrzeżeń „trivially copyable” z modułu nagrań `tasma.dk`; są niegroźne.
+
+## Uruchomienie (Linux)
+
+```sh
+sudo apt install build-essential git cmake libx11-dev libxrandr-dev libxinerama-dev \
+    libxcursor-dev libxi-dev libgl-dev libasound2-dev
+./uruchom.sh          # za pierwszym razem uruchamia ./przygotuj_linux.sh: wersje pakietów dla Linuksa i raylib
+./uruchom.sh testy    # testy logiki, bez okna
+```
+
+Potrzebny jest też Duckling z `duck` w PATH. `przygotuj_linux.sh` kopiuje wersje pakietów z `zewnetrzne/linux/` do `zewnetrzne/` (pliki z repozytorium dostają w git znacznik `skip-worktree`, więc `git status` pozostaje czysty) i buduje statyczną raylib 5.5 skryptem pakietu `grafika`. **Kroki dla Linuksa nie zostały sprawdzone na prawdziwej maszynie z Linuksem.**
 
 ## Struktura
 
@@ -40,7 +51,9 @@ swiat/    pakiet swiat_pilek: świat gry na pakiecie fizyka (podłoga, ściany, 
 gra/      pakiet pilki_fizyka: okno, mysz, klawiatura i rysowanie (grafika), pętla gry
 testy/    pakiet testy_pilek: 33 sprawdzenia fizyki bez okna, kod wyjścia = liczba błędów
 zrzuty/   obrazy do README, tworzone przez grę: PILKI_ZRZUTY=1 gra/.duck_build/dev/pilki_fizyka
-przygotuj_macos.sh   raylib 5.5 oraz kopie pakietów grafika i fizyka dla macOS do zewnetrzne/ (poza gitem)
+zewnetrzne/          pakiety grafika i fizyka (wersje dla macOS i Linuksa) oraz raylib dla macOS; opis w zewnetrzne/README.md
+przygotuj_macos.sh   buduje raylib, gdy brakuje jej dla procesora Maca (np. Intel)
+przygotuj_linux.sh   przygotowanie na Linuksie: wersje pakietów z zewnetrzne/linux/ i raylib
 ```
 
 ## Zgodność z tutorialem
@@ -74,4 +87,4 @@ Dodatki:
 
 ## Licencja
 
-MIT. Kopie pakietów `grafika` i `fizyka` w `zewnetrzne/` pochodzą z duckling-biblioteki (MIT; fizyka jest portem Box2D, MIT, Erin Catto), a raylib ma licencję zlib.
+MIT. Kopie pakietów `grafika` i `fizyka` w `zewnetrzne/` pochodzą z duckling-biblioteki (MIT, Paweł Kępczyński, szczegóły w `zewnetrzne/README.md`; fizyka jest portem Box2D, MIT, Erin Catto), a raylib ma licencję zlib.

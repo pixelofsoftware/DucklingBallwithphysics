@@ -1,0 +1,28 @@
+# Platform layer of recordings. Select exactly one tasma_platforma.dk at build time.
+import core.builtins as builtins;
+import core.containers.*;
+class ClockValue { valid: bool = false; nanoseconds: u64 = 0u64; }
+fun cString(s: ref String) -> cptr char = { return builtins.ptr_from_slice[char](s.asSlice()) as cptr char; }
+fun nullFile(value: cptr u8) -> bool = { var p: cptr u8 = value; return (&p as cptr u64)[0]==0u64; }
+import fizyka.rdzen as coreClock;
+import fizyka.rdzen.Timespec as ClockStamp;
+extern("C") {
+    fundecl close(fd: i32) -> i32;
+    fundecl fdopen(fd: i32,mode: cptr char) -> cptr u8;
+    fundecl mkstemp(path: cptr char) -> i32;
+    fundecl rename(source: cptr char,destination: cptr char) -> i32;
+}
+fun monotonicClock() -> ClockValue = {
+    var stamp = coreClock.Timespec(0i64,0i64);
+    if (coreClock.clock_gettime(6i32,&stamp as cptr ClockStamp)!=0i32 or stamp.seconds<0i64 or stamp.nanoseconds<0i64 or stamp.nanoseconds>=1000000000i64) return ClockValue();
+    if ((stamp.seconds as u64)>18446744073u64) return ClockValue();
+    let posixWhole: u64 = (stamp.seconds as u64)*1000000000u64; let posixPart: u64 = stamp.nanoseconds as u64;
+    if (posixPart>18446744073709551615u64-posixWhole) return ClockValue(); return ClockValue(true,posixWhole+posixPart);
+}
+# false: no file descriptor was created; true: caller checks/cleans the FILE.
+fun openTemporary(temporary: ref String,file: ref cptr u8) -> bool = {
+    let fd: i32 = mkstemp(cString(temporary)); if (fd<0i32) return false;
+    file = fdopen(fd,builtins.ptr_from_slice[char]("wb\0") as cptr char);
+    if (nullFile(file)) close(fd); return true;
+}
+fun replace(source: cptr char,destination: cptr char) -> bool = { return rename(source,destination)==0i32; }

@@ -1,0 +1,5 @@
+metadata:
+  name: fizyka
+  version: '0.1.0'
+  license: MIT
+  description: Fizyka gier 2D, port Box2D 3.1.1

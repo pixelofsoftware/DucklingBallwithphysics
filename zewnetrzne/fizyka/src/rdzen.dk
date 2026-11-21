@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: 2023 Erin Catto
+# SPDX-License-Identifier: MIT
+# Box2D 3.1.1 core.c and timer.c: version, assertions, length units, clock and hash.
+import fizyka.kola.*;
+const B2_ENABLE_ASSERT: bool = false;
+extern("C") {
+    class Timespec { seconds: i64; nanoseconds: i64; }
+    fundecl clock_gettime(clock: i32,value: cptr Timespec) -> i32;
+    fundecl sched_yield() -> i32;
+    fundecl abort() -> ();
+    @cffi_variadic_fixed_params(1) fundecl printf(format: cptr char,condition: cptr char,file: cptr char,line: i32) -> i32;
+}
+class Version { major: i32 = 3i32; minor: i32 = 1i32; revision: i32 = 1i32; }
+fun b2GetVersion() -> Version = { return Version(); }
+# Box2D core.c: the default handler prints the failed assertion and asks for a breakpoint.
+fun b2DefaultAssertFcn(condition: cptr char,file: cptr char,line: i32) -> i32 = {
+    printf(builtins.ptr_from_slice[char]("BOX2D ASSERTION: %s, %s, line %d\n\0") as cptr char,condition,file,line);
+    return 1i32;
+}
+var assertHandler: funptr(cptr char,cptr char,i32) -> i32 = b2DefaultAssertFcn;
+fun b2InternalAssertFcn(condition: cptr char,file: cptr char,line: i32) -> i32 = {
+    return assertHandler(condition,file,line);
+}
+fun b2PortBreakpoint() -> () = { abort(); }
+# Assertions are compiled out like in a Box2D release build (B2_ENABLE_ASSERT is false).
+fun b2Assert(accepted: bool,condition: str,file: str,line: i32) -> () = {
+    if (B2_ENABLE_ASSERT and not accepted) {
+        if (b2InternalAssertFcn(builtins.ptr_from_slice[char](condition) as cptr char,
+                builtins.ptr_from_slice[char](file) as cptr char,line) != 0i32) {
+            b2PortBreakpoint();
+        }
+    }
+}
+fun b2SetAssertFcn(callback: funptr(cptr char,cptr char,i32) -> i32) -> () = {
+    assertHandler = callback;
+}
+fun b2SetLengthUnitsPerMeter(value: f32) -> () = {
+    b2Assert(value == value and value <= 3.4028234663852886e38f32 and value > 0.0f32,
+        "b2IsValidFloat( lengthUnits ) && lengthUnits > 0.0f\0","rdzen.dk\0",32i32);
+    setLengthUnitsValue(value);
+}
+fun b2GetLengthUnitsPerMeter() -> f32 = { return b2_lengthUnitsPerMeter; }
+fun b2GetTicks() -> u64 = {
+    var stamp = Timespec(0i64,0i64);clock_gettime(6i32,&stamp as cptr Timespec);
+    return (stamp.seconds*1000000000i64+stamp.nanoseconds) as u64;
+}
+fun b2GetMilliseconds(ticks: u64) -> f32 = { return ((b2GetTicks()-ticks) as f64/1000000.0f64) as f32; }
+fun b2GetMillisecondsAndReset(ticks: ref u64) -> f32 = {
+    let now: u64 = b2GetTicks();let ms: f32 = ((now-ticks) as f64/1000000.0f64) as f32;ticks = now;return ms;
+}
+fun b2Yield() -> () = { sched_yield(); }
+fun b2Hash(hash: u32,data: cptr u8,count: i32) -> u32 = {
+    var result: u32 = hash;var i: i32 = 0i32;
+    while (i<count) { result = (result<<5u32)+result+data[i];i += 1i32; }return result;
+}

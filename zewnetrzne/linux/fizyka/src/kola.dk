@@ -1,0 +1,247 @@
+#{
+SPDX-FileCopyrightText: 2023 Erin Catto
+SPDX-License-Identifier: MIT
+
+MIT License
+
+Copyright (c) 2022 Erin Catto
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+#}
+
+import std.math;
+import fizyka.rdzen as rotationChecks;
+import fizyka.ruch as mathMotion;
+import fizyka.drzewo as mathTree;
+import fizyka.wielokaty as mathPoly;
+
+# Box2D 3.1.1 math_functions.h/math_functions.c; scalar source order.
+fun b2MinInt(a: i32,b: i32) -> i32 = { return if a < b then a else b; }
+fun b2MaxInt(a: i32,b: i32) -> i32 = { return if a > b then a else b; }
+fun b2IsNormalizedRot(q: Rot) -> bool = {
+    let qq: f32 = q.s*q.s+q.c*q.c;
+    return 1.0f32-0.0006f32 < qq and qq < 1.0f32+0.0006f32;
+}
+fun b2IsValidRotation(q: Rot) -> bool = {
+    return q.s == q.s and q.c == q.c and q.s <= 3.4028234663852886e38f32
+        and q.s >= -3.4028234663852886e38f32 and q.c <= 3.4028234663852886e38f32
+        and q.c >= -3.4028234663852886e38f32 and b2IsNormalizedRot(q);
+}
+fun b2NLerp(q1: Rot,q2: Rot,t: f32) -> Rot = {
+    let omt: f32 = 1.0f32-t;
+    let q: Rot = Rot(omt*q1.c+t*q2.c,omt*q1.s+t*q2.s);
+    let mag: f32 = math.sqrt(q.s*q.s+q.c*q.c);
+    let invMag: f32 = if mag > 0.0f32 then 1.0f32/mag else 0.0f32;
+    return Rot(q.c*invMag,q.s*invMag);
+}
+fun b2ComputeRotationBetweenUnitVectors(v1: Vec2,v2: Vec2) -> Rot = {
+    if (rotationChecks.B2_ENABLE_ASSERT) rotationChecks.b2Assert(mathMotion.b2AbsFloat(1.0f32-mathMotion.b2Length(v1))<100.0f32*FLT_EPSILON,"b2AbsFloat( 1.0f - b2Length( v1 ) ) < 100.0f * FLT_EPSILON\0","kola.dk\0",54i32);
+    if (rotationChecks.B2_ENABLE_ASSERT) rotationChecks.b2Assert(mathMotion.b2AbsFloat(1.0f32-mathMotion.b2Length(v2))<100.0f32*FLT_EPSILON,"b2AbsFloat( 1.0f - b2Length( v2 ) ) < 100.0f * FLT_EPSILON\0","kola.dk\0",55i32);
+    let q: Rot = Rot(v1.x*v2.x+v1.y*v2.y,v1.x*v2.y-v1.y*v2.x);
+    let mag: f32 = math.sqrt(q.s*q.s+q.c*q.c);
+    let invMag: f32 = if mag > 0.0f32 then 1.0f32/mag else 0.0f32;
+    return Rot(q.c*invMag,q.s*invMag);
+}
+fun b2ComputeAngularVelocity(q1: Rot,q2: Rot,inv_h: f32) -> f32 = { return inv_h*(q2.s*q1.c-q2.c*q1.s); }
+fun b2Rot_GetAngle(q: Rot) -> f32 = { return b2Atan2(q.s,q.c); }
+fun b2Rot_GetXAxis(q: Rot) -> Vec2 = { return Vec2(q.c,q.s); }
+fun b2Rot_GetYAxis(q: Rot) -> Vec2 = { return Vec2(-q.s,q.c); }
+fun b2InvTransformPoint(t: Transform,p: Vec2) -> Vec2 = {
+    let vx: f32 = p.x-t.p.x;let vy: f32 = p.y-t.p.y;
+    return Vec2(t.q.c*vx+t.q.s*vy,-t.q.s*vx+t.q.c*vy);
+}
+
+# Box2D 8c661469, include/box2d/math_functions.h:184-193. MIT.
+fun b2LeftPerp(v: Vec2) -> Vec2 = { return Vec2(-v.y, v.x); }
+# Box2D 8c661469, include/box2d/math_functions.h:190-193. MIT.
+fun b2RightPerp(v: Vec2) -> Vec2 = { return Vec2(v.y, -v.x); }
+
+# Source references below: Box2D 8c661469c9507d3ad6fbd2fea3f1aa71669c2fe3.
+# Value types only. No C ABI or Box2D library calls are needed by this port.
+
+# Box2D include/box2d/math_functions.h:20
+class Vec2 { x: f32 = 0.0f32; y: f32 = 0.0f32; }
+# Box2D include/box2d/math_functions.h:37
+class Rot { c: f32 = 0.0f32; s: f32 = 0.0f32; }
+# Box2D include/box2d/math_functions.h:44
+class Transform { p: Vec2 = Vec2(); q: Rot = Rot(); }
+# Box2D include/box2d/collision.h:104
+class Circle { center: Vec2 = Vec2(); radius: f32 = 0.0f32; }
+
+# Box2D include/box2d/collision.h:498; each explicit field starts at +0.
+class ManifoldPoint {
+    point: Vec2 = Vec2();
+    anchorA: Vec2 = Vec2();
+    anchorB: Vec2 = Vec2();
+    separation: f32 = 0.0f32;
+    normalImpulse: f32 = 0.0f32;
+    tangentImpulse: f32 = 0.0f32;
+    totalNormalImpulse: f32 = 0.0f32;
+    normalVelocity: f32 = 0.0f32;
+    id: u16 = 0u16;
+    persisted: bool = false;
+}
+
+# Box2D include/box2d/collision.h:538.
+# Two named slots represent C points[0] and points[1]; no memory layout is assumed.
+class Manifold {
+    normal: Vec2 = Vec2();
+    rollingImpulse: f32 = 0.0f32;
+    point0: ManifoldPoint = ManifoldPoint();
+    point1: ManifoldPoint = ManifoldPoint();
+    pointCount: i32 = 0i32;
+}
+
+# Box2D src/constants.h:6 and src/core.c:33. Fixed units for this slice.
+var b2_lengthUnitsPerMeter: f32 = 1.0f32;
+# Box2D src/constants.h:23
+var B2_LINEAR_SLOP: f32 = 0.005f32 * b2_lengthUnitsPerMeter;
+# Box2D src/constants.h:38
+var B2_SPECULATIVE_DISTANCE: f32 = 4.0f32 * B2_LINEAR_SLOP;
+var B2_HUGE: f32 = 100000.0f32 * b2_lengthUnitsPerMeter;
+var B2_AABB_MARGIN: f32 = 0.05f32 * b2_lengthUnitsPerMeter;
+
+# core.c:179-190. Derived values retain the original f32 evaluation order.
+fun setLengthUnitsValue(value: f32) -> () = {
+    b2_lengthUnitsPerMeter = value;
+    B2_LINEAR_SLOP = 0.005f32 * value;
+    B2_SPECULATIVE_DISTANCE = 4.0f32 * B2_LINEAR_SLOP;
+    B2_HUGE = 100000.0f32 * value;
+    B2_AABB_MARGIN = 0.05f32 * value;
+}
+# Box2D include/box2d/math_functions.h:321 (C FLT_EPSILON, binary32 0x34000000).
+const FLT_EPSILON: f32 = 0.00000011920928955078125f32;
+
+# Box2D 8c661469c9507d3ad6fbd2fea3f1aa71669c2fe3, include/box2d/math_functions.h:196
+fun b2Add(a: Vec2, b: Vec2) -> Vec2 = {
+    return Vec2(a.x + b.x, a.y + b.y);
+}
+
+# Box2D 8c661469c9507d3ad6fbd2fea3f1aa71669c2fe3, include/box2d/math_functions.h:202
+fun b2Sub(a: Vec2, b: Vec2) -> Vec2 = {
+    return Vec2(a.x - b.x, a.y - b.y);
+}
+
+# Box2D 8c661469c9507d3ad6fbd2fea3f1aa71669c2fe3, include/box2d/math_functions.h:215
+fun b2Lerp(a: Vec2, b: Vec2, t: f32) -> Vec2 = {
+    return Vec2((1.0f32 - t) * a.x + t * b.x,
+        (1.0f32 - t) * a.y + t * b.y);
+}
+
+# Box2D 8c661469c9507d3ad6fbd2fea3f1aa71669c2fe3, include/box2d/math_functions.h:233
+fun b2MulAdd(a: Vec2, s: f32, b: Vec2) -> Vec2 = {
+    return Vec2(a.x + s * b.x, a.y + s * b.y);
+}
+
+# Box2D 8c661469c9507d3ad6fbd2fea3f1aa71669c2fe3, include/box2d/math_functions.h:318
+fun b2GetLengthAndNormalize(length: ref f32, v: Vec2) -> Vec2 = {
+    length = math.sqrt(v.x * v.x + v.y * v.y);
+    if (length < FLT_EPSILON) return Vec2(0.0f32, 0.0f32);
+    let invLength: f32 = 1.0f32 / length;
+    return Vec2(invLength * v.x, invLength * v.y);
+}
+
+# Box2D 8c661469c9507d3ad6fbd2fea3f1aa71669c2fe3, include/box2d/math_functions.h:458
+fun b2InvMulRot(q: Rot, r: Rot) -> Rot = {
+    var qr = Rot();
+    qr.s = q.c * r.s - q.s * r.c;
+    qr.c = q.c * r.c + q.s * r.s;
+    return qr;
+}
+
+# Box2D 8c661469c9507d3ad6fbd2fea3f1aa71669c2fe3, include/box2d/math_functions.h:488
+fun b2RotateVector(q: Rot, v: Vec2) -> Vec2 = {
+    return Vec2(q.c * v.x - q.s * v.y, q.s * v.x + q.c * v.y);
+}
+
+# Box2D 8c661469c9507d3ad6fbd2fea3f1aa71669c2fe3, include/box2d/math_functions.h:494
+fun b2InvRotateVector(q: Rot, v: Vec2) -> Vec2 = {
+    return Vec2(q.c * v.x + q.s * v.y, -q.s * v.x + q.c * v.y);
+}
+
+# Box2D 8c661469c9507d3ad6fbd2fea3f1aa71669c2fe3, include/box2d/math_functions.h:500
+fun b2TransformPoint(t: Transform, p: Vec2) -> Vec2 = {
+    let x: f32 = (t.q.c * p.x - t.q.s * p.y) + t.p.x;
+    let y: f32 = (t.q.s * p.x + t.q.c * p.y) + t.p.y;
+    return Vec2(x, y);
+}
+
+# Box2D 8c661469c9507d3ad6fbd2fea3f1aa71669c2fe3, include/box2d/math_functions.h:532
+fun b2InvMulTransforms(a: Transform, b: Transform) -> Transform = {
+    var result = Transform();
+    result.q = b2InvMulRot(a.q, b.q);
+    result.p = b2InvRotateVector(a.q, b2Sub(b.p, a.p));
+    return result;
+}
+
+# Box2D 8c661469c9507d3ad6fbd2fea3f1aa71669c2fe3, src/manifold.c:40
+fun b2CollideCircles(circleA: Circle, xfA: Transform, circleB: Circle, xfB: Transform) -> Manifold = {
+    var manifold = Manifold();
+    let xf: Transform = b2InvMulTransforms(xfA, xfB);
+    let pointA: Vec2 = circleA.center;
+    let pointB: Vec2 = b2TransformPoint(xf, circleB.center);
+    var distance: f32 = 0.0f32;
+    let normal: Vec2 = b2GetLengthAndNormalize(&distance, b2Sub(pointB, pointA));
+    let radiusA: f32 = circleA.radius;
+    let radiusB: f32 = circleB.radius;
+    let separation: f32 = (distance - radiusA) - radiusB;
+    if (separation > B2_SPECULATIVE_DISTANCE) return manifold;
+
+    let cA: Vec2 = b2MulAdd(pointA, radiusA, normal);
+    let cB: Vec2 = b2MulAdd(pointB, -radiusB, normal);
+    let contactPointA: Vec2 = b2Lerp(cA, cB, 0.5f32);
+    manifold.normal = b2RotateVector(xfA.q, normal);
+    manifold.point0.anchorA = b2RotateVector(xfA.q, contactPointA);
+    manifold.point0.anchorB = b2Add(manifold.point0.anchorA, b2Sub(xfA.p, xfB.p));
+    manifold.point0.point = b2Add(manifold.point0.anchorA, xfA.p);
+    manifold.point0.separation = separation;
+    manifold.point0.id = 0u16;
+    manifold.pointCount = 1i32;
+    return manifold;
+}
+
+fun b2Atan2(y: f32, x: f32) -> f32 = {
+    if (x == 0.0f32 and y == 0.0f32) return 0.0f32;
+    let ax: f32 = mathMotion.b2AbsFloat(x); let ay: f32 = mathMotion.b2AbsFloat(y);
+    let mx: f32 = mathTree.b2MaxFloat(ay, ax); let mn: f32 = mathPoly.b2MinFloat(ay, ax);
+    let a: f32 = mn / mx; let s: f32 = a * a; let c: f32 = s * a; let q: f32 = s * s;
+    var r: f32 = 0.024840285f32 * q + 0.18681418f32;
+    let t: f32 = -0.094097948f32 * q - 0.33213072f32;
+    r = r * s + t; r = r * c + a;
+    if (ay > ax) r = 1.57079637f32 - r;
+    if (x < 0.0f32) r = 3.14159274f32 - r;
+    if (y < 0.0f32) r = -r;
+    return r;
+}
+
+extern("C") { fundecl remainderf(value: f32,divisor: f32) -> f32; }
+class CosSin { cosine: f32 = 1.0f32;sine: f32 = 0.0f32; }
+fun b2ComputeCosSin(radians: f32) -> CosSin = {
+    let x: f32=remainderf(radians,2.0f32*3.14159265359f32);let pi: f32=3.14159265359f32;let pi2: f32=pi*pi;var cosine: f32=0.0f32;var sine: f32=0.0f32;
+    if(x < -0.5f32*pi){let y: f32=x+pi;let y2: f32=y*y;cosine= -(pi2-4.0f32*y2)/(pi2+y2);}
+    else if(x > 0.5f32*pi){let yUpper: f32=x-pi;let yUpper2: f32=yUpper*yUpper;cosine= -(pi2-4.0f32*yUpper2)/(pi2+yUpper2);}
+    else {let x2: f32=x*x;cosine=(pi2-4.0f32*x2)/(pi2+x2);}
+    if(x < 0.0f32){let ySin: f32=x+pi;sine= -16.0f32*ySin*(pi-ySin)/(5.0f32*pi2-4.0f32*ySin*(pi-ySin));}
+    else sine=16.0f32*x*(pi-x)/(5.0f32*pi2-4.0f32*x*(pi-x));
+    let mag: f32=math.sqrt(sine*sine+cosine*cosine);let invMag: f32=if mag>0.0f32 then 1.0f32/mag else 0.0f32;return CosSin(cosine*invMag,sine*invMag);
+}
+
+fun b2MakeRot(radians: f32) -> Rot = { let cs: CosSin = b2ComputeCosSin(radians);return Rot(cs.cosine,cs.sine); }
+fun b2IsValidVec2(v: Vec2) -> bool = { return v.x==v.x and v.y==v.y and v.x>= -3.4028234663852886e38f32 and v.x<=3.4028234663852886e38f32 and v.y>= -3.4028234663852886e38f32 and v.y<=3.4028234663852886e38f32; }
+fun b2Abs(value: Vec2) -> Vec2 = { return Vec2(mathMotion.b2AbsFloat(value.x),mathMotion.b2AbsFloat(value.y)); }

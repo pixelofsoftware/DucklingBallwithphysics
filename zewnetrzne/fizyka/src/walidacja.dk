@@ -1,0 +1,219 @@
+# SPDX-FileCopyrightText: 2023 Erin Catto
+# SPDX-License-Identifier: MIT
+# Box2D 3.1.1 + poprawki.patch, world.c:2770-3255. Logical counts exclude retained List slots.
+import fizyka.swiat.*;
+import fizyka.rdzen as asserts;
+import fizyka.bitset as validationBits;
+import fizyka.szeroka as validationBroad;
+fun rootIsland(world: ref World,id: i32) -> i32 = {
+    var root: i32 = id;
+    while (root != -1i32 and world.islands.at(root as i64).parentIsland != -1i32) root = world.islands.at(root as i64).parentIsland;
+    return root;
+}
+fun freeId(pool: ref IdPool,id: i32) -> bool = {
+    var i: i32 = 0i32;while (i<pool.freeCount) { if (pool.freeArray.at(i as i64)==id) return true;i += 1i32; }return false;
+}
+fun b2ValidateConnectivity(world: ref World) -> () = {
+    if (not asserts.B2_ENABLE_ASSERT) return;
+    var i: i32 = 0i32;
+    while (i as i64<world.bodies.length()) {
+        var body: ref BodyRecord = world.bodies.at(i as i64);
+        if (body.id == -1i32) { asserts.b2Assert(freeId(&world.bodyIdPool,i),"freeId(&world.bodyIdPool,i)\0","walidacja.dk\0",21i32);} else {
+        asserts.b2Assert(not freeId(&world.bodyIdPool,i),"not freeId(&world.bodyIdPool,i)\0","walidacja.dk\0",22i32);asserts.b2Assert(i==body.id,"i==body.id\0","walidacja.dk\0",22i32);
+        let root: i32 = rootIsland(world,body.islandId);
+        var key: i32 = body.headContactKey;
+        while (key != -1i32) {
+            var c: ref ContactRecord = world.contacts.at((key>>1i32) as i64);
+            if ((c.flags&1u32)!=0u32) { if (body.setIndex!=0i32) { asserts.b2Assert(rootIsland(world,c.islandId)==root,"rootIsland(world,c.islandId)==root\0","walidacja.dk\0",27i32); } }
+            else { asserts.b2Assert(c.islandId == -1i32,"c.islandId == -1i32\0","walidacja.dk\0",28i32); }
+            key = contactEdge(c,key&1i32).nextKey;
+        }
+        key = body.headJointKey;
+        while (key != -1i32) {
+            var j: ref JointRecord = world.joints.at((key>>1i32) as i64);
+            let other: i32 = if (key&1i32)==0i32 then j.edgeB.bodyId else j.edgeA.bodyId;
+            let otherSet: i32 = world.bodies.at(other as i64).setIndex;
+            if (body.setIndex==1i32 or otherSet==1i32 or (body.setIndex==0i32 and otherSet==0i32)) { asserts.b2Assert(j.islandId == -1i32,"j.islandId == -1i32\0","walidacja.dk\0",36i32); }
+            else if (body.setIndex!=0i32) { asserts.b2Assert(rootIsland(world,j.islandId)==root,"rootIsland(world,j.islandId)==root\0","walidacja.dk\0",37i32); }
+            key = if (key&1i32)==0i32 then j.edgeA.nextKey else j.edgeB.nextKey;
+        }
+        }
+        i += 1i32;
+    }
+}
+fun validateBody(world: ref World,setIndex: i32,local: i32,id: i32) -> () = {
+    asserts.b2Assert(id>=0i32 and id as i64<world.bodies.length(),"id>=0i32 and id as i64<world.bodies.length()\0","walidacja.dk\0",45i32);
+    var body: ref BodyRecord = world.bodies.at(id as i64);
+    asserts.b2Assert(body.setIndex==setIndex,"body.setIndex==setIndex\0","walidacja.dk\0",47i32);asserts.b2Assert(body.localIndex==local,"body.localIndex==local\0","walidacja.dk\0",47i32);
+    if (setIndex==1i32) { asserts.b2Assert(body.headContactKey == -1i32,"body.headContactKey == -1i32\0","walidacja.dk\0",48i32); }
+    var previous: i32 = -1i32;var shapeId: i32 = body.headShapeId;
+    while (shapeId != -1i32) {
+        var shape: ref ShapeRecord = world.shapes.at(shapeId as i64);
+        asserts.b2Assert(shape.id==shapeId,"shape.id==shapeId\0","walidacja.dk\0",52i32);asserts.b2Assert(shape.prevShapeId==previous,"shape.prevShapeId==previous\0","walidacja.dk\0",52i32);
+        if (setIndex==1i32) { asserts.b2Assert(shape.proxyKey == -1i32,"shape.proxyKey == -1i32\0","walidacja.dk\0",53i32); }
+        else if (setIndex==0i32) { asserts.b2Assert(validationBroad.B2_PROXY_TYPE(shape.proxyKey)==0i32,"validationBroad.B2_PROXY_TYPE(shape.proxyKey)==0i32\0","walidacja.dk\0",54i32); }
+        else { let proxyType: i32 = validationBroad.B2_PROXY_TYPE(shape.proxyKey);asserts.b2Assert(proxyType==1i32 or proxyType==2i32,"proxyType==1i32 or proxyType==2i32\0","walidacja.dk\0",55i32); }
+        previous = shapeId;shapeId = shape.nextShapeId;
+    }
+    var key: i32 = body.headContactKey;
+    while (key != -1i32) {
+        var c: ref ContactRecord = world.contacts.at((key>>1i32) as i64);
+        asserts.b2Assert(c.setIndex!=0i32,"c.setIndex!=0i32\0","walidacja.dk\0",61i32);asserts.b2Assert(c.edgeA.bodyId==id or c.edgeB.bodyId==id,"c.edgeA.bodyId==id or c.edgeB.bodyId==id\0","walidacja.dk\0",61i32);
+        key = contactEdge(c,key&1i32).nextKey;
+    }
+    key = body.headJointKey;
+    while (key != -1i32) {
+        let jointId: i32 = key>>1i32;var j: ref JointRecord = world.joints.at(jointId as i64);
+        let other: i32 = if (key&1i32)==0i32 then j.edgeB.bodyId else j.edgeA.bodyId;
+        let otherSet: i32 = world.bodies.at(other as i64).setIndex;
+        if (setIndex==1i32 or otherSet==1i32) { asserts.b2Assert(j.setIndex==1i32,"j.setIndex==1i32\0","walidacja.dk\0",69i32); }
+        else if (setIndex==0i32 and otherSet==0i32) { asserts.b2Assert(j.setIndex==0i32,"j.setIndex==0i32\0","walidacja.dk\0",70i32); }
+        else if (setIndex==2i32) { asserts.b2Assert(j.setIndex==2i32,"j.setIndex==2i32\0","walidacja.dk\0",71i32); }
+        else if (setIndex>=3i32) { asserts.b2Assert(j.setIndex==setIndex,"j.setIndex==setIndex\0","walidacja.dk\0",72i32); }
+        var sim: ref JointSim = b2GetJointSim(world,jointId);
+        asserts.b2Assert(sim.jointId==jointId,"sim.jointId==jointId\0","walidacja.dk\0",74i32);asserts.b2Assert(sim.bodyIdA==j.edgeA.bodyId,"sim.bodyIdA==j.edgeA.bodyId\0","walidacja.dk\0",74i32);asserts.b2Assert(sim.bodyIdB==j.edgeB.bodyId,"sim.bodyIdB==j.edgeB.bodyId\0","walidacja.dk\0",74i32);
+        key = if (key&1i32)==0i32 then j.edgeA.nextKey else j.edgeB.nextKey;
+    }
+}
+fun validateColorBodies(world: ref World,color: ref GraphColor,a: i32,b: i32) -> () = {
+    asserts.b2Assert(validationBits.b2GetBit(&color.bodySet,a)==(world.bodies.at(a as i64).bodyType!=0i32),"validationBits.b2GetBit(&color.bodySet,a)==(world.bodies.at(a as i64).bodyType!=0i32)\0","walidacja.dk\0",79i32);
+    asserts.b2Assert(validationBits.b2GetBit(&color.bodySet,b)==(world.bodies.at(b as i64).bodyType!=0i32),"validationBits.b2GetBit(&color.bodySet,b)==(world.bodies.at(b as i64).bodyType!=0i32)\0","walidacja.dk\0",80i32);
+}
+fun b2ValidateSolverSets(world: ref World) -> () = {
+    if (not asserts.B2_ENABLE_ASSERT) return;
+    asserts.b2Assert(world.bodyIdPool.nextIndex as i64==world.bodies.length(),"world.bodyIdPool.nextIndex as i64==world.bodies.length()\0","walidacja.dk\0",84i32);
+    asserts.b2Assert(world.contactIdPool.nextIndex as i64==world.contacts.length(),"world.contactIdPool.nextIndex as i64==world.contacts.length()\0","walidacja.dk\0",85i32);
+    asserts.b2Assert(world.jointIdPool.nextIndex as i64==world.joints.length(),"world.jointIdPool.nextIndex as i64==world.joints.length()\0","walidacja.dk\0",86i32);
+    asserts.b2Assert(world.islandIdPool.nextIndex as i64==world.islands.length(),"world.islandIdPool.nextIndex as i64==world.islands.length()\0","walidacja.dk\0",87i32);
+    asserts.b2Assert(world.solverSetIdPool.nextIndex as i64==world.solverSets.length(),"world.solverSetIdPool.nextIndex as i64==world.solverSets.length()\0","walidacja.dk\0",88i32);
+    var sets: i32 = 0i32;var bodies: i32 = 0i32;var contacts: i32 = 0i32;var joints: i32 = 0i32;var islands: i32 = 0i32;
+    var index: i32 = 0i32;
+    while (index as i64<world.solverSets.length()) {
+        var set: ref SolverSet = world.solverSets.at(index as i64);
+        if (set.setIndex != -1i32) {
+            sets += 1i32;
+            if (index==0i32) { asserts.b2Assert(set.contactCount==0i32,"set.contactCount==0i32\0","walidacja.dk\0",95i32);asserts.b2Assert(set.islandCount==0i32,"set.islandCount==0i32\0","walidacja.dk\0",95i32); }
+            else if (index==2i32) { asserts.b2Assert(set.bodyCount as i64<=set.bodyStates.length(),"set.bodyCount as i64<=set.bodyStates.length()\0","walidacja.dk\0",96i32);asserts.b2Assert(set.jointCount==0i32,"set.jointCount==0i32\0","walidacja.dk\0",96i32); }
+            else if (index==1i32) { asserts.b2Assert(set.islandCount==0i32,"set.islandCount==0i32\0","walidacja.dk\0",97i32); }
+            # Non-awake bodyStates have logical count zero; retained storage is deliberately ignored.
+            asserts.b2Assert(set.bodyCount>=0i32,"set.bodyCount>=0i32\0","walidacja.dk\0",99i32);asserts.b2Assert(set.contactCount>=0i32,"set.contactCount>=0i32\0","walidacja.dk\0",99i32);asserts.b2Assert(set.jointCount>=0i32,"set.jointCount>=0i32\0","walidacja.dk\0",99i32);asserts.b2Assert(set.islandCount>=0i32,"set.islandCount>=0i32\0","walidacja.dk\0",99i32);
+            bodies += set.bodyCount;contacts += set.contactCount;joints += set.jointCount;islands += set.islandCount;
+            var i: i32 = 0i32;
+            while (i<set.bodyCount) { validateBody(world,index,i,set.bodySims.at(i as i64).bodyId);i += 1i32; }
+            i = 0i32;
+            while (i<set.contactCount) {
+                var sim: ref ContactSim = set.contactSims.at(i as i64);var c: ref ContactRecord = world.contacts.at(sim.contactId as i64);
+                if (index==2i32) { asserts.b2Assert(sim.manifold.pointCount==0i32 or (sim.simFlags&262144u32)!=0u32,"sim.manifold.pointCount==0i32 or (sim.simFlags&262144u32)!=0u32\0","walidacja.dk\0",106i32); }
+                asserts.b2Assert(c.setIndex==index,"c.setIndex==index\0","walidacja.dk\0",107i32);asserts.b2Assert(c.colorIndex == -1i32,"c.colorIndex == -1i32\0","walidacja.dk\0",107i32);asserts.b2Assert(c.localIndex==i,"c.localIndex==i\0","walidacja.dk\0",107i32);i += 1i32;
+            }
+            i = 0i32;
+            while (i<set.jointCount) {
+                var j: ref JointRecord = world.joints.at(set.jointSims.at(i as i64).jointId as i64);
+                asserts.b2Assert(j.setIndex==index,"j.setIndex==index\0","walidacja.dk\0",112i32);asserts.b2Assert(j.colorIndex == -1i32,"j.colorIndex == -1i32\0","walidacja.dk\0",112i32);asserts.b2Assert(j.localIndex==i,"j.localIndex==i\0","walidacja.dk\0",112i32);i += 1i32;
+            }
+            i = 0i32;
+            while (i<set.islandCount) {
+                var island: ref Island = world.islands.at(set.islandSims.at(i as i64) as i64);
+                asserts.b2Assert(island.setIndex==index,"island.setIndex==index\0","walidacja.dk\0",117i32);asserts.b2Assert(island.localIndex==i,"island.localIndex==i\0","walidacja.dk\0",117i32);i += 1i32;
+            }
+        } else { asserts.b2Assert(set.bodyCount==0i32,"set.bodyCount==0i32\0","walidacja.dk\0",119i32);asserts.b2Assert(set.contactCount==0i32,"set.contactCount==0i32\0","walidacja.dk\0",119i32);asserts.b2Assert(set.jointCount==0i32,"set.jointCount==0i32\0","walidacja.dk\0",119i32);asserts.b2Assert(set.islandCount==0i32,"set.islandCount==0i32\0","walidacja.dk\0",119i32); }
+        index += 1i32;
+    }
+    asserts.b2Assert(sets==world.solverSetIdPool.nextIndex-world.solverSetIdPool.freeCount,"sets==world.solverSetIdPool.nextIndex-world.solverSetIdPool.freeCount\0","walidacja.dk\0",122i32);
+    asserts.b2Assert(bodies==world.bodyIdPool.nextIndex-world.bodyIdPool.freeCount,"bodies==world.bodyIdPool.nextIndex-world.bodyIdPool.freeCount\0","walidacja.dk\0",123i32);
+    asserts.b2Assert(islands==world.islandIdPool.nextIndex-world.islandIdPool.freeCount,"islands==world.islandIdPool.nextIndex-world.islandIdPool.freeCount\0","walidacja.dk\0",124i32);
+    index = 0i32;
+    while (index<12i32) {
+        var color: ref GraphColor = &world.constraintGraph.colors[index];
+        asserts.b2Assert(color.contactCount>=0i32,"color.contactCount>=0i32\0","walidacja.dk\0",128i32);contacts += color.contactCount;asserts.b2Assert(color.jointCount>=0i32,"color.jointCount>=0i32\0","walidacja.dk\0",128i32);joints += color.jointCount;
+        var i: i32 = 0i32;
+        while (i<color.contactCount) {
+            var sim: ref ContactSim = color.contactSims.at(i as i64);var c: ref ContactRecord = world.contacts.at(sim.contactId as i64);
+            asserts.b2Assert(sim.manifold.pointCount>0i32 or (sim.simFlags&655360u32)!=0u32,"sim.manifold.pointCount>0i32 or (sim.simFlags&655360u32)!=0u32\0","walidacja.dk\0",132i32);
+            asserts.b2Assert(c.setIndex==2i32,"c.setIndex==2i32\0","walidacja.dk\0",133i32);asserts.b2Assert(c.colorIndex==index,"c.colorIndex==index\0","walidacja.dk\0",133i32);asserts.b2Assert(c.localIndex==i,"c.localIndex==i\0","walidacja.dk\0",133i32);
+            if (index<11i32) validateColorBodies(world,color,c.edgeA.bodyId,c.edgeB.bodyId);i += 1i32;
+        }
+        i = 0i32;
+        while (i<color.jointCount) {
+            var j: ref JointRecord = world.joints.at(color.jointSims.at(i as i64).jointId as i64);
+            asserts.b2Assert(j.setIndex==2i32,"j.setIndex==2i32\0","walidacja.dk\0",139i32);asserts.b2Assert(j.colorIndex==index,"j.colorIndex==index\0","walidacja.dk\0",139i32);asserts.b2Assert(j.localIndex==i,"j.localIndex==i\0","walidacja.dk\0",139i32);
+            if (index<11i32) validateColorBodies(world,color,j.edgeA.bodyId,j.edgeB.bodyId);i += 1i32;
+        }
+        index += 1i32;
+    }
+    asserts.b2Assert(contacts==world.contactIdPool.nextIndex-world.contactIdPool.freeCount,"contacts==world.contactIdPool.nextIndex-world.contactIdPool.freeCount\0","walidacja.dk\0",144i32);
+    asserts.b2Assert(contacts==world.broadPhase.pairSet.count,"contacts==world.broadPhase.pairSet.count\0","walidacja.dk\0",145i32);asserts.b2Assert(joints==world.jointIdPool.nextIndex-world.jointIdPool.freeCount,"joints==world.jointIdPool.nextIndex-world.jointIdPool.freeCount\0","walidacja.dk\0",145i32);
+}
+fun b2ValidateContacts(world: ref World) -> () = {
+    if (not asserts.B2_ENABLE_ASSERT) return;
+    asserts.b2Assert(world.contacts.length()==world.contactIdPool.nextIndex as i64,"world.contacts.length()==world.contactIdPool.nextIndex as i64\0","walidacja.dk\0",149i32);
+    var allocated: i32 = 0i32;var i: i32 = 0i32;
+    while (i as i64<world.contacts.length()) {
+        var c: ref ContactRecord = world.contacts.at(i as i64);
+        if (c.contactId != -1i32) {
+        asserts.b2Assert(c.contactId==i,"c.contactId==i\0","walidacja.dk\0",154i32);allocated += 1i32;
+        let touching: bool = (c.flags&1u32)!=0u32;
+        if (c.setIndex==2i32) {
+            if (touching) { asserts.b2Assert(c.colorIndex>=0i32 and c.colorIndex<12i32,"c.colorIndex>=0i32 and c.colorIndex<12i32\0","walidacja.dk\0",157i32); }
+            else { asserts.b2Assert(c.colorIndex == -1i32,"c.colorIndex == -1i32\0","walidacja.dk\0",158i32); }
+        } else if (c.setIndex>=3i32) { asserts.b2Assert(touching,"touching\0","walidacja.dk\0",159i32); }
+        else { asserts.b2Assert(not touching and c.setIndex==1i32,"not touching and c.setIndex==1i32\0","walidacja.dk\0",160i32); }
+        var sim: ref ContactSim = b2GetContactSim(world,c);
+        asserts.b2Assert(sim.contactId==i,"sim.contactId==i\0","walidacja.dk\0",162i32);
+        # Box2D debug-only bodyIds are represented by the owning shape IDs in D.
+        asserts.b2Assert(world.shapes.at(sim.shapeIdA as i64).bodyId==c.edgeA.bodyId,"world.shapes.at(sim.shapeIdA as i64).bodyId==c.edgeA.bodyId\0","walidacja.dk\0",164i32);
+        asserts.b2Assert(world.shapes.at(sim.shapeIdB as i64).bodyId==c.edgeB.bodyId,"world.shapes.at(sim.shapeIdB as i64).bodyId==c.edgeB.bodyId\0","walidacja.dk\0",165i32);
+        asserts.b2Assert(touching==((sim.simFlags&65536u32)!=0u32),"touching==((sim.simFlags&65536u32)!=0u32)\0","walidacja.dk\0",166i32);
+        asserts.b2Assert(sim.manifold.pointCount>=0i32 and sim.manifold.pointCount<=2i32,"sim.manifold.pointCount>=0i32 and sim.manifold.pointCount<=2i32\0","walidacja.dk\0",167i32);
+        }
+        i += 1i32;
+    }
+    asserts.b2Assert(allocated==world.contactIdPool.nextIndex-world.contactIdPool.freeCount,"allocated==world.contactIdPool.nextIndex-world.contactIdPool.freeCount\0","walidacja.dk\0",171i32);
+}
+
+# Box2D 3.1.1 + poprawki.patch, island.c:870-976. Logical intrusive lists, including all head/tail/count predicates.
+fun b2ValidateIsland(world: ref World,islandId: i32) -> () = {
+    if (not asserts.B2_ENABLE_ASSERT or islandId == -1i32) return;
+    var island: ref Island = world.islands.at(islandId as i64);
+    asserts.b2Assert(island.islandId==islandId,"island.islandId==islandId\0","walidacja.dk\0",178i32);
+    asserts.b2Assert(island.setIndex != -1i32,"island.setIndex != -1i32\0","walidacja.dk\0",179i32);
+    asserts.b2Assert(island.headBody != -1i32,"island.headBody != -1i32\0","walidacja.dk\0",180i32);
+    asserts.b2Assert(island.tailBody != -1i32,"island.tailBody != -1i32\0","walidacja.dk\0",181i32);
+    asserts.b2Assert(island.bodyCount>0i32,"island.bodyCount>0i32\0","walidacja.dk\0",182i32);
+    if (island.bodyCount>1i32) { asserts.b2Assert(island.tailBody!=island.headBody,"island.tailBody!=island.headBody\0","walidacja.dk\0",183i32); }
+    asserts.b2Assert(island.bodyCount<=world.bodyIdPool.nextIndex-world.bodyIdPool.freeCount,"island.bodyCount<=world.bodyIdPool.nextIndex-world.bodyIdPool.freeCount\0","walidacja.dk\0",184i32);
+    var count: i32 = 0i32;var bodyId: i32 = island.headBody;
+    while (bodyId != -1i32) {
+        var body: ref BodyRecord = world.bodies.at(bodyId as i64);
+        asserts.b2Assert(body.islandId==islandId,"body.islandId==islandId\0","walidacja.dk\0",188i32);asserts.b2Assert(body.setIndex==island.setIndex,"body.setIndex==island.setIndex\0","walidacja.dk\0",188i32);count += 1i32;
+        if (count==island.bodyCount) { asserts.b2Assert(bodyId==island.tailBody,"bodyId==island.tailBody\0","walidacja.dk\0",189i32); }
+        bodyId = body.islandNext;
+    }
+    asserts.b2Assert(count==island.bodyCount,"count==island.bodyCount\0","walidacja.dk\0",192i32);
+    if (island.headContact != -1i32) {
+        asserts.b2Assert(island.tailContact != -1i32,"island.tailContact != -1i32\0","walidacja.dk\0",194i32);asserts.b2Assert(island.contactCount>0i32,"island.contactCount>0i32\0","walidacja.dk\0",194i32);
+        if (island.contactCount>1i32) { asserts.b2Assert(island.tailContact!=island.headContact,"island.tailContact!=island.headContact\0","walidacja.dk\0",195i32); }
+        asserts.b2Assert(island.contactCount<=world.contactIdPool.nextIndex-world.contactIdPool.freeCount,"island.contactCount<=world.contactIdPool.nextIndex-world.contactIdPool.freeCount\0","walidacja.dk\0",196i32);
+        count = 0i32;var contactId: i32 = island.headContact;
+        while (contactId != -1i32) {
+            var contact: ref ContactRecord = world.contacts.at(contactId as i64);
+            asserts.b2Assert(contact.setIndex==island.setIndex,"contact.setIndex==island.setIndex\0","walidacja.dk\0",200i32);asserts.b2Assert(contact.islandId==islandId,"contact.islandId==islandId\0","walidacja.dk\0",200i32);count += 1i32;
+            if (count==island.contactCount) { asserts.b2Assert(contactId==island.tailContact,"contactId==island.tailContact\0","walidacja.dk\0",201i32); }
+            contactId = contact.islandNext;
+        }
+        asserts.b2Assert(count==island.contactCount,"count==island.contactCount\0","walidacja.dk\0",204i32);
+    } else { asserts.b2Assert(island.tailContact == -1i32,"island.tailContact == -1i32\0","walidacja.dk\0",205i32);asserts.b2Assert(island.contactCount==0i32,"island.contactCount==0i32\0","walidacja.dk\0",205i32); }
+    if (island.headJoint != -1i32) {
+        asserts.b2Assert(island.tailJoint != -1i32,"island.tailJoint != -1i32\0","walidacja.dk\0",207i32);asserts.b2Assert(island.jointCount>0i32,"island.jointCount>0i32\0","walidacja.dk\0",207i32);
+        if (island.jointCount>1i32) { asserts.b2Assert(island.tailJoint!=island.headJoint,"island.tailJoint!=island.headJoint\0","walidacja.dk\0",208i32); }
+        asserts.b2Assert(island.jointCount<=world.jointIdPool.nextIndex-world.jointIdPool.freeCount,"island.jointCount<=world.jointIdPool.nextIndex-world.jointIdPool.freeCount\0","walidacja.dk\0",209i32);
+        count = 0i32;var jointId: i32 = island.headJoint;
+        while (jointId != -1i32) {
+            var joint: ref JointRecord = world.joints.at(jointId as i64);
+            asserts.b2Assert(joint.setIndex==island.setIndex,"joint.setIndex==island.setIndex\0","walidacja.dk\0",213i32);count += 1i32;
+            if (count==island.jointCount) { asserts.b2Assert(jointId==island.tailJoint,"jointId==island.tailJoint\0","walidacja.dk\0",214i32); }
+            jointId = joint.islandNext;
+        }
+        asserts.b2Assert(count==island.jointCount,"count==island.jointCount\0","walidacja.dk\0",217i32);
+    } else { asserts.b2Assert(island.tailJoint == -1i32,"island.tailJoint == -1i32\0","walidacja.dk\0",218i32);asserts.b2Assert(island.jointCount==0i32,"island.jointCount==0i32\0","walidacja.dk\0",218i32); }
+}

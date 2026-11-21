@@ -1,0 +1,253 @@
+# Box2D 3.1.1, samples/sample.cpp:279-378. MIT.
+# Value helpers over the existing world queries, joint solver and sensor events.
+import fizyka.kola.*;
+import fizyka.gra as game;
+import fizyka.swiat as world;
+import fizyka.zapytaniaswiata as query;
+import fizyka.zapytania as local;
+import fizyka.odleglosc as distance;
+import fizyka.szeroka as broad;
+import fizyka.drzewo as tree;
+import fizyka.zbior.Key64;
+
+class PickResult {
+    status: i32 = 0i32; reason: i32 = 0i32; hit: bool = false;
+    bodyId: world.BodyId = world.BodyId(); shapeId: broad.ShapeId = broad.ShapeId();
+    body: game.BodyNumber = game.BodyNumber(); shape: game.ShapeNumber = game.ShapeNumber();
+}
+class PickTrace {
+    shapeId: broad.ShapeId = broad.ShapeId(); bodyId: world.BodyId = world.BodyId();
+    bodyType: i32 = 0i32; tested: bool = false; hit: bool = false; response: bool = true;
+}
+fun ignorePickTrace(value: PickTrace, context: Key64) -> () = { }
+class PickFrame {
+    point: Vec2 = Vec2(); filter: query.CheckedQueryFilter = query.CheckedQueryFilter(); result: PickResult = PickResult();
+    trace: funptr(PickTrace,Key64) -> () = ignorePickTrace; context: Key64 = Key64();
+}
+fun emptyPickFrames() -> List[PickFrame] = { var values: List[PickFrame]; return values; }
+var pickFrames: List[PickFrame] = emptyPickFrames(); var pickDepth: i32 = 0i32;
+fun pickPreflight(owner: game.WorldNumber, point: Vec2, filter: query.CheckedQueryFilter) -> distance.Validation = {
+    var status: i32 = game.worldStatus(owner); if (status != 0i32) return distance.Validation(status);
+    if (filter.hasExcludedBody != 0i32) { status = game.bodyStatus(owner,filter.excludedBody); if (status != 0i32) return distance.Validation(status); }
+    if (filter.hasExcludedShape != 0i32) { status = game.shapeStatus(owner,filter.excludedShape); if (status != 0i32) return distance.Validation(status); }
+    if (world.worlds.at(owner.slot as i64).locked) return distance.Validation(7i32,1i32);
+    if (filter.bodyTypeBits < 0i32 or filter.bodyTypeBits > 7i32 or filter.includeSensors < 0i32 or filter.includeSensors > 1i32
+        or filter.hasExcludedBody < 0i32 or filter.hasExcludedBody > 1i32 or filter.hasExcludedShape < 0i32 or filter.hasExcludedShape > 1i32
+        or not local.finiteVector(point)) return distance.Validation(5i32,22i32);
+    return distance.Validation();
+}
+fun pickCallback(id: broad.ShapeId, context: Key64) -> bool = {
+    let index: i64 = context.low as i64;
+    var w: ref world.World = world.worlds.at(id.world0 as i64); var s: ref world.ShapeRecord = w.shapes.at((id.index1-1i32) as i64);
+    let bodyId: world.BodyId = world.b2MakeBodyId(w,s.bodyId); let kind: i32 = w.bodies.at(s.bodyId as i64).bodyType;
+    let tested: bool = query.checkedCandidate(w,s,pickFrames.at(index).filter) and kind == 2i32;
+    let hit: bool = tested and query.b2Shape_TestPoint(id,pickFrames.at(index).point);
+    let trace: funptr(PickTrace,Key64) -> () = pickFrames.at(index).trace;
+    trace(PickTrace(id,bodyId,kind,tested,hit,not hit),pickFrames.at(index).context);
+    if (hit) {
+        let value: query.ShapeQueryValue = query.shapeQueryValue(w,id);
+        pickFrames.at(index).result = PickResult(0i32,0i32,true,bodyId,id,value.body,value.shape);
+    }
+    return not hit;
+}
+fun checkedPickPoint(owner: game.WorldNumber, point: Vec2, filter: query.CheckedQueryFilter,
+    trace: funptr(PickTrace,Key64) -> () = ignorePickTrace, context: Key64 = Key64()) -> PickResult = {
+    let check: distance.Validation = pickPreflight(owner,point,filter);
+    if (check.status != 0i32) return PickResult(check.status,check.reason);
+    let index: i32 = pickDepth; pickDepth += 1i32; var frame = PickFrame();
+    frame.point = point; frame.filter = filter; frame.trace = trace; frame.context = context;
+    if (index as i64 == pickFrames.length()) pickFrames.push(frame); else pickFrames.at(index as i64) = frame;
+    let id = world.WorldId((owner.slot+1i32) as u16,world.worlds.at(owner.slot as i64).generation);
+    let half = Vec2(0.001f32,0.001f32);
+    query.b2World_OverlapAABB(id,tree.AABB(b2Sub(point,half),b2Add(point,half)),filter.raw,pickCallback,Key64(index as u32,0u32));
+    let result: PickResult = pickFrames.at(index as i64).result; pickDepth -= 1i32; return result;
+}
+fun pickPoint(owner: game.WorldNumber, point: Vec2, filter: query.WorldQueryFilter) -> PickResult = {
+    return checkedPickPoint(owner,point,query.checkFilter(filter));
+}
+class MouseSnapshot {
+    owner: game.WorldNumber = game.WorldNumber(); active: bool = false; hasGround: bool = false;
+    ground: game.BodyNumber = game.BodyNumber(); body: game.BodyNumber = game.BodyNumber(); shape: game.ShapeNumber = game.ShapeNumber();
+    joint: game.JointNumber = game.JointNumber(); jointId: world.JointId = world.JointId();
+    target: Vec2 = Vec2(); maxForce: f32 = 0.0f32; hertz: f32 = 0.0f32; dampingRatio: f32 = 0.0f32;
+}
+class MouseDrag { bound: bool = false; value: MouseSnapshot = MouseSnapshot(); }
+class MouseResult { status: i32 = 0i32; reason: i32 = 0i32; applied: bool = false; value: MouseSnapshot = MouseSnapshot(); }
+fun readMouseDrag(drag: ref MouseDrag) -> MouseSnapshot = { return drag.value; }
+fun bindMouseDrag(owner: game.WorldNumber) -> MouseResult = {
+    let status: i32 = game.worldMutationStatus(owner);
+    if (status != 0i32) return MouseResult(status,if status == 7i32 then 1i32 else 0i32);
+    var value = MouseSnapshot(); value.owner = owner; return MouseResult(0i32,0i32,false,value);
+}
+fun sameWorld(a: game.WorldNumber, b: game.WorldNumber) -> bool = { return a.slot == b.slot and game.equalKey(a.birthTicket,b.birthTicket); }
+fun mousePreflight(owner: game.WorldNumber, drag: ref MouseDrag, point: Vec2, action: i32, button: i32,
+    filter: query.CheckedQueryFilter = query.CheckedQueryFilter()) -> distance.Validation = {
+    let status: i32 = game.worldStatus(owner); if (status != 0i32) return distance.Validation(status);
+    if (action > 1i32 and not sameWorld(owner,drag.value.owner)) return distance.Validation(2i32);
+    let filtered: bool = action == 0i32 or action == 2i32 and not drag.value.active and button == 0i32;
+    if (filtered) return pickPreflight(owner,point,filter);
+    if (world.worlds.at(owner.slot as i64).locked) return distance.Validation(7i32,1i32);
+    if (action == 3i32 and drag.value.active and world.b2Joint_IsValid(drag.value.jointId) and not local.finiteVector(point)) return distance.Validation(5i32,22i32);
+    return distance.Validation();
+}
+fun checkedMouseDown(owner: game.WorldNumber, drag: ref MouseDrag, point: Vec2, button: i32, filter: query.CheckedQueryFilter,
+    trace: funptr(PickTrace,Key64) -> () = ignorePickTrace, context: Key64 = Key64()) -> MouseResult = {
+    let check: distance.Validation = mousePreflight(owner,drag,point,2i32,button,filter);
+    if (check.status != 0i32) return MouseResult(check.status,check.reason);
+    if (drag.value.active or button != 0i32) return MouseResult(0i32,0i32,false,drag.value);
+    let picked: PickResult = checkedPickPoint(owner,point,filter,trace,context);
+    if (picked.status != 0i32) return MouseResult(picked.status,picked.reason);
+    if (not picked.hit) return MouseResult(0i32,0i32,false,drag.value);
+    let objects: game.MouseDragObjectsResult = game.createMouseDragObjects(owner,picked.body,point);
+    if (objects.status != 0i32) return MouseResult(objects.status,objects.reason);
+    drag.value = MouseSnapshot(owner,true,true,objects.ground,picked.body,picked.shape,objects.joint,objects.jointId,point,objects.maxForce,objects.hertz,objects.dampingRatio);
+    game.setAwake(owner,picked.body,true); return MouseResult(0i32,0i32,true,drag.value);
+}
+fun mouseDown(owner: game.WorldNumber, drag: ref MouseDrag, point: Vec2, button: i32, filter: query.WorldQueryFilter) -> MouseResult = {
+    return checkedMouseDown(owner,drag,point,button,query.checkFilter(filter));
+}
+fun clearDeadMouse(drag: ref MouseDrag) -> () = {
+    if (drag.value.active and not world.b2Joint_IsValid(drag.value.jointId)) {
+        drag.value.active = false; drag.value.joint = game.JointNumber(); drag.value.jointId = world.JointId();
+        drag.value.target = Vec2(); drag.value.maxForce = 0.0f32; drag.value.hertz = 0.0f32; drag.value.dampingRatio = 0.0f32;
+    }
+}
+fun mouseMove(owner: game.WorldNumber, drag: ref MouseDrag, point: Vec2) -> MouseResult = {
+    let check: distance.Validation = mousePreflight(owner,drag,point,3i32,0i32);
+    if (check.status != 0i32) return MouseResult(check.status,check.reason);
+    clearDeadMouse(drag); var applied: bool = false;
+    if (drag.value.active) { game.setMouseTarget(owner,drag.value.joint,point); game.setAwake(owner,drag.value.body,true); drag.value.target = point; applied = true; }
+    return MouseResult(0i32,0i32,applied,drag.value);
+}
+fun mouseUp(owner: game.WorldNumber, drag: ref MouseDrag, button: i32) -> MouseResult = {
+    let check: distance.Validation = mousePreflight(owner,drag,Vec2(),4i32,button);
+    if (check.status != 0i32) return MouseResult(check.status,check.reason);
+    clearDeadMouse(drag); var applied: bool = false;
+    if (drag.value.active and button == 0i32) {
+        game.destroyJoint(owner,drag.value.joint); game.destroyBody(owner,drag.value.ground);
+        drag.value.active = false; drag.value.hasGround = false; drag.value.ground = game.BodyNumber();
+        drag.value.joint = game.JointNumber(); drag.value.jointId = world.JointId();
+        drag.value.target = Vec2(); drag.value.maxForce = 0.0f32; drag.value.hertz = 0.0f32; drag.value.dampingRatio = 0.0f32; applied = true;
+    }
+    return MouseResult(0i32,0i32,applied,drag.value);
+}
+
+class GateEntry {
+    owner: game.WorldNumber = game.WorldNumber(); gateId: broad.ShapeId = broad.ShapeId(); gate: game.ShapeNumber = game.ShapeNumber(); gateBody: game.BodyNumber = game.BodyNumber();
+    visitorId: broad.ShapeId = broad.ShapeId(); visitor: game.ShapeNumber = game.ShapeNumber(); visitorBody: game.BodyNumber = game.BodyNumber(); tick: i64 = 0i64; evidenceMask: i32 = 0i32;
+}
+class GateTracker {
+    synced: bool = false; inside: bool = false; lastCast: bool = false; lastBegin: bool = false; lastEndSeen: bool = false;
+    owner: game.WorldNumber = game.WorldNumber(); gate: game.ShapeNumber = game.ShapeNumber(); visitor: game.ShapeNumber = game.ShapeNumber();
+    lastTick: i64 = 0i64; lastStart: Transform = Transform(); lastEnd: Transform = Transform(); gateTransform: Transform = Transform();
+    gateProxy: distance.ShapeProxy = distance.ShapeProxy(); visitorProxy: distance.ShapeProxy = distance.ShapeProxy();
+    gateFilter: broad.ShapeFilter = broad.ShapeFilter(); visitorFilter: broad.ShapeFilter = broad.ShapeFilter();
+}
+class GateBindResult { status: i32 = 0i32; reason: i32 = 0i32; value: GateTracker = GateTracker(); }
+class GateResult {
+    status: i32 = 0i32; reason: i32 = 0i32; entered: bool = false; inside: bool = false; castHit: bool = false; beginSeen: bool = false; endSeen: bool = false; value: GateEntry = GateEntry();
+}
+fun readGateTracker(tracker: ref GateTracker) -> GateTracker = { return tracker; }
+fun gateDomain(owner: game.WorldNumber, gate: game.ShapeNumber, visitor: game.ShapeNumber) -> distance.Validation = {
+    var status: i32 = game.worldStatus(owner); if (status != 0i32) return distance.Validation(status);
+    status = game.shapeStatus(owner,gate); if (status != 0i32) return distance.Validation(status);
+    status = game.shapeStatus(owner,visitor); if (status != 0i32) return distance.Validation(status);
+    var w: ref world.World = world.worlds.at(owner.slot as i64);
+    if (w.locked) return distance.Validation(7i32,1i32);
+    let a: world.ShapeRecord = w.shapes.at(gate.slot as i64); let b: world.ShapeRecord = w.shapes.at(visitor.slot as i64);
+    let ba: world.BodyRecord = w.bodies.at(a.bodyId as i64); let bb: world.BodyRecord = w.bodies.at(b.bodyId as i64);
+    if (not (a.shapeType == 0i32 or a.shapeType == 1i32 or a.shapeType == 3i32) or not (b.shapeType == 0i32 or b.shapeType == 1i32 or b.shapeType == 3i32)
+        or ba.bodyType != 0i32 or bb.bodyType == 0i32 or ba.setIndex == 1i32 or bb.setIndex == 1i32 or not a.isSensor or b.isSensor
+        or not a.enableSensorEvents or not b.enableSensorEvents or a.filter.groupIndex != 0i32 or b.filter.groupIndex != 0i32 or w.rawCallbacks.filterInstalled) return distance.Validation(5i32,24i32);
+    return distance.Validation();
+}
+fun shapeXf(owner: game.WorldNumber, number: game.ShapeNumber) -> Transform = {
+    var w: ref world.World = world.worlds.at(owner.slot as i64); return query.shapeTransform(w,w.shapes.at(number.slot as i64));
+}
+fun sameFloat(a: f32, b: f32) -> bool = { var x: f32 = a; var y: f32 = b; return (&x as cptr u32)[0] == (&y as cptr u32)[0]; }
+fun sameTransform(a: Transform, b: Transform) -> bool = { return sameFloat(a.p.x,b.p.x) and sameFloat(a.p.y,b.p.y) and sameFloat(a.q.c,b.q.c) and sameFloat(a.q.s,b.q.s); }
+fun sameProxy(a: ref distance.ShapeProxy, b: ref distance.ShapeProxy) -> bool = {
+    if (a.count != b.count or not sameFloat(a.radius,b.radius)) return false; var i: i32 = 0i32;
+    while (i < 8i32) { if (not sameFloat(a.points[i].x,b.points[i].x) or not sameFloat(a.points[i].y,b.points[i].y)) return false; i += 1i32; } return true;
+}
+fun sameFilter(a: broad.ShapeFilter, b: broad.ShapeFilter) -> bool = { return a.categoryBits == b.categoryBits and a.maskBits == b.maskBits and a.groupIndex == b.groupIndex; }
+class GateFind { gate: broad.ShapeId = broad.ShapeId(); found: bool = false; }
+fun emptyGateFinds() -> List[GateFind] = { var values: List[GateFind]; return values; }
+var gateFinds: List[GateFind] = emptyGateFinds(); var gateDepth: i32 = 0i32;
+fun sameShapeId(a: broad.ShapeId, b: broad.ShapeId) -> bool = { return a.index1 == b.index1 and a.world0 == b.world0 and a.generation == b.generation; }
+fun gateOverlap(id: broad.ShapeId, context: Key64) -> bool = { if (sameShapeId(id,gateFinds.at(context.low as i64).gate)) gateFinds.at(context.low as i64).found = true; return true; }
+fun gateCast(id: broad.ShapeId, point: Vec2, normal: Vec2, fraction: f32, context: Key64) -> f32 = {
+    if (not sameShapeId(id,gateFinds.at(context.low as i64).gate)) return -1.0f32; gateFinds.at(context.low as i64).found = true; return 1.0f32;
+}
+fun gateQuery(tracker: ref GateTracker, xf: Transform, translation: Vec2, cast: bool) -> bool = {
+    var proxy: distance.ShapeProxy = tracker.visitorProxy; var i: i32 = 0i32;
+    while (i < proxy.count) { proxy.points[i] = b2TransformPoint(xf,proxy.points[i]); i += 1i32; }
+    let id = world.WorldId((tracker.owner.slot+1i32) as u16,world.worlds.at(tracker.owner.slot as i64).generation);
+    let gateId: broad.ShapeId = world.b2MakeShapeId(world.worlds.at(tracker.owner.slot as i64),tracker.gate.slot);
+    let index: i32 = gateDepth; gateDepth += 1i32;
+    if (index as i64 == gateFinds.length()) gateFinds.push(GateFind(gateId)); else gateFinds.at(index as i64) = GateFind(gateId);
+    let f: broad.ShapeFilter = tracker.visitorFilter;
+    let filter = query.QueryFilter(f.categoryBits,f.maskBits);
+    if (cast) query.b2World_CastShape(id,&proxy,translation,filter,gateCast,Key64(index as u32,0u32));
+    else query.b2World_OverlapShape(id,&proxy,filter,gateOverlap,Key64(index as u32,0u32));
+    let found: bool = gateFinds.at(index as i64).found; gateDepth -= 1i32; return found;
+}
+fun captureGate(tracker: ref GateTracker, tick: i64) -> () = {
+    var w: ref world.World = world.worlds.at(tracker.owner.slot as i64);
+    tracker.gateTransform = shapeXf(tracker.owner,tracker.gate);
+    tracker.gateProxy = world.b2MakeShapeDistanceProxy(w.shapes.at(tracker.gate.slot as i64));
+    tracker.visitorProxy = world.b2MakeShapeDistanceProxy(w.shapes.at(tracker.visitor.slot as i64));
+    tracker.gateFilter = w.shapes.at(tracker.gate.slot as i64).filter; tracker.visitorFilter = w.shapes.at(tracker.visitor.slot as i64).filter;
+    tracker.lastStart = shapeXf(tracker.owner,tracker.visitor); tracker.lastEnd = tracker.lastStart;
+    tracker.lastTick = tick; tracker.synced = true; tracker.lastCast = false; tracker.lastBegin = false; tracker.lastEndSeen = false;
+    tracker.inside = gateQuery(tracker,tracker.lastEnd,Vec2(),false);
+}
+fun bindGate(owner: game.WorldNumber, gate: game.ShapeNumber, visitor: game.ShapeNumber, tick: i64) -> GateBindResult = {
+    let check: distance.Validation = gateDomain(owner,gate,visitor); if (check.status != 0i32) return GateBindResult(check.status,check.reason);
+    if (tick < 0i64) return GateBindResult(5i32,24i32);
+    var value = GateTracker(); value.owner = owner; value.gate = gate; value.visitor = visitor; captureGate(&value,tick); return GateBindResult(0i32,0i32,value);
+}
+fun gatePreflight(owner: game.WorldNumber, tracker: ref GateTracker, tick: i64, from: Transform, to: Transform, resync: bool) -> distance.Validation = {
+    let status: i32 = game.worldStatus(owner); if (status != 0i32) return distance.Validation(status);
+    if (not sameWorld(owner,tracker.owner)) return distance.Validation(2i32);
+    let check: distance.Validation = gateDomain(owner,tracker.gate,tracker.visitor); if (check.status != 0i32) return check;
+    if (not tracker.synced or tick < 0i64) return distance.Validation(5i32,24i32);
+    if (resync) { if (tick < tracker.lastTick) return distance.Validation(5i32,24i32); return distance.Validation(); }
+    if (not distance.validTransform(from) or not distance.validTransform(to)) return distance.Validation(5i32,22i32);
+    var w: ref world.World = world.worlds.at(owner.slot as i64);
+    var gp: distance.ShapeProxy = world.b2MakeShapeDistanceProxy(w.shapes.at(tracker.gate.slot as i64));
+    var vp: distance.ShapeProxy = world.b2MakeShapeDistanceProxy(w.shapes.at(tracker.visitor.slot as i64));
+    if (not sameTransform(tracker.gateTransform,shapeXf(owner,tracker.gate)) or not sameProxy(&gp,&tracker.gateProxy) or not sameProxy(&vp,&tracker.visitorProxy)
+        or not sameFilter(tracker.gateFilter,w.shapes.at(tracker.gate.slot as i64).filter) or not sameFilter(tracker.visitorFilter,w.shapes.at(tracker.visitor.slot as i64).filter)
+        or not sameTransform(to,shapeXf(owner,tracker.visitor)) or not sameFloat(from.q.c,to.q.c) or not sameFloat(from.q.s,to.q.s)) return distance.Validation(5i32,24i32);
+    if (tick == tracker.lastTick) {
+        if (not sameTransform(from,tracker.lastStart) or not sameTransform(to,tracker.lastEnd)) return distance.Validation(5i32,24i32); return distance.Validation();
+    }
+    if (tracker.lastTick == 9223372036854775807i64 or tick != tracker.lastTick+1i64 or not sameTransform(from,tracker.lastEnd)) return distance.Validation(5i32,24i32);
+    return distance.Validation();
+}
+fun resyncGate(owner: game.WorldNumber, tracker: ref GateTracker, tick: i64) -> GateBindResult = {
+    let check: distance.Validation = gatePreflight(owner,tracker,tick,Transform(),Transform(),true);
+    if (check.status != 0i32) return GateBindResult(check.status,check.reason);
+    var value: GateTracker = tracker; captureGate(&value,tick); tracker = value; return GateBindResult(0i32,0i32,value);
+}
+fun sameShapeNumber(a: game.ShapeNumber, b: game.ShapeNumber) -> bool = { return a.slot == b.slot and game.equalKey(a.birthTicket,b.birthTicket) and game.equalKey(a.ownerTicket,b.ownerTicket); }
+fun advanceGate(owner: game.WorldNumber, tracker: ref GateTracker, tick: i64, from: Transform, to: Transform) -> GateResult = {
+    let check: distance.Validation = gatePreflight(owner,tracker,tick,from,to,false);
+    if (check.status != 0i32) return GateResult(check.status,check.reason);
+    if (tick == tracker.lastTick) return GateResult(0i32,0i32,false,tracker.inside,tracker.lastCast,tracker.lastBegin,tracker.lastEndSeen);
+    let cast: bool = gateQuery(tracker,from,b2Sub(to.p,from.p),true);
+    var events: game.SensorEventCopy = game.copySensorEvents(owner); var begin: bool = false; var end: bool = false; var i: i64 = 0i64;
+    while (i < events.beginEvents.length()) { let e: game.SensorTouch = events.beginEvents.at(i); if (sameShapeNumber(e.sensor,tracker.gate) and sameShapeNumber(e.visitor,tracker.visitor)) begin = true; i += 1i64; }
+    i = 0i64; while (i < events.endEvents.length()) { let e: game.SensorTouch = events.endEvents.at(i); if (sameShapeNumber(e.sensor,tracker.gate) and sameShapeNumber(e.visitor,tracker.visitor)) end = true; i += 1i64; }
+    let inside: bool = gateQuery(tracker,to,Vec2(),false); let entered: bool = not tracker.inside and (inside or cast or begin);
+    var result = GateResult(0i32,0i32,entered,inside,cast,begin,end);
+    if (entered) {
+        var w: ref world.World = world.worlds.at(owner.slot as i64);
+        let gid: broad.ShapeId = world.b2MakeShapeId(w,tracker.gate.slot); let vid: broad.ShapeId = world.b2MakeShapeId(w,tracker.visitor.slot);
+        let g: query.ShapeQueryValue = query.shapeQueryValue(w,gid); let v: query.ShapeQueryValue = query.shapeQueryValue(w,vid);
+        result.value = GateEntry(owner,gid,g.shape,g.body,vid,v.shape,v.body,tick,(if begin then 1i32 else 0i32) | (if cast then 2i32 else 0i32) | (if inside then 4i32 else 0i32));
+    }
+    tracker.inside = inside; tracker.lastCast = cast; tracker.lastBegin = begin; tracker.lastEndSeen = end; tracker.lastTick = tick; tracker.lastStart = from; tracker.lastEnd = to;
+    return result;
+}

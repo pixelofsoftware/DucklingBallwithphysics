@@ -1,0 +1,326 @@
+#{
+SPDX-FileCopyrightText: 2023 Erin Catto
+SPDX-License-Identifier: MIT
+
+MIT License
+
+Copyright (c) 2022 Erin Catto
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+#}
+
+# SPDX-FileCopyrightText: 2025 Erin Catto
+# SPDX-License-Identifier: MIT
+# Box2D 3.1.1 / 8c661469. Raw mover geometry and checked plane operations.
+# MIT license notice is retained in the reused kola/odleglosc modules.
+import fizyka.kola.*;
+import fizyka.odleglosc as distance;
+import fizyka.zapytania as local;
+import fizyka.wielokaty as poly;
+import fizyka.ruch as motion;
+import fizyka.swiat as world;
+import fizyka.rdzen as asserts;
+import fizyka.zapytaniaswiata as query;
+import fizyka.drzewo as tree;
+import fizyka.szeroka as broad;
+import fizyka.gra as game;
+import fizyka.zbior.Key64;
+
+class Plane { normal: Vec2 = Vec2(); offset: f32 = 0.0f32; }
+class PlaneResult { hit: bool = false; point: Vec2 = Vec2(); plane: Plane = Plane(); }
+class CollisionPlane { plane: Plane = Plane(); pushLimit: f32 = 0.0f32; push: f32 = 0.0f32; clipVelocity: bool = false; }
+class PlaneSolverResult { translation: Vec2 = Vec2(); iterationCount: i32 = 0i32; }
+
+# math_functions.c:55 and math_functions.h:643. Predicate accepts all bit patterns.
+fun b2IsValidPlane(a: Plane) -> bool = {
+    return local.finiteVector(a.normal) and world.b2IsNormalized(a.normal) and distance.finite(a.offset);
+}
+fun b2PlaneSeparation(a: Plane, point: Vec2) -> f32 = { return poly.b2Dot(a.normal,point)-a.offset; }
+
+# geometry.c:953-1059: identical GJK construction shared by four raw adapters.
+fun collideProxy(target: distance.ShapeProxy, mover: ref world.Capsule, totalRadius: f32) -> PlaneResult = {
+    var input = distance.DistanceInput(); input.proxyA = target; input.proxyB = local.capsuleProxy(mover);
+    input.transformA = Transform(Vec2(),Rot(1.0f32,0.0f32)); input.transformB = input.transformA; input.useRadii = false;
+    var cache = distance.SimplexCache(); var trace = distance.SimplexTrace();
+    let output: distance.DistanceOutput = distance.b2ShapeDistance(&input,&cache,&trace,0i32,false);
+    if (output.distance <= totalRadius) return PlaneResult(true,output.pointA,Plane(output.normal,totalRadius-output.distance));
+    return PlaneResult();
+}
+fun b2CollideMoverAndCircle(shape: ref Circle, mover: ref world.Capsule) -> PlaneResult = {
+    var proxy: distance.ShapeProxy = local.circleProxy(shape); proxy.radius = 0.0f32;
+    return collideProxy(proxy,mover,mover.radius+shape.radius);
+}
+fun b2CollideMoverAndCapsule(shape: ref world.Capsule, mover: ref world.Capsule) -> PlaneResult = {
+    var proxy: distance.ShapeProxy = local.capsuleProxy(shape); proxy.radius = 0.0f32;
+    return collideProxy(proxy,mover,mover.radius+shape.radius);
+}
+fun b2CollideMoverAndPolygon(shape: ref poly.Polygon, mover: ref world.Capsule) -> PlaneResult = {
+    let proxy: distance.ShapeProxy = distance.b2MakeProxy(&shape.vertices,shape.count,shape.radius);
+    return collideProxy(proxy,mover,mover.radius+shape.radius);
+}
+fun b2CollideMoverAndSegment(shape: ref world.Segment, mover: ref world.Capsule) -> PlaneResult = {
+    return collideProxy(local.segmentProxy(shape),mover,mover.radius);
+}
+
+# shape.c:863-899. Chain is a segment; point remains LOCAL. No #951 here.
+fun b2CollideMover(shape: ref world.ShapeRecord, xf: Transform, mover: ref world.Capsule) -> PlaneResult = {
+    var localMover = world.Capsule(b2InvRotateVector(xf.q,b2Sub(mover.center1,xf.p)),
+        b2InvRotateVector(xf.q,b2Sub(mover.center2,xf.p)),mover.radius);
+    var result = PlaneResult();
+    if (shape.shapeType == 0i32) result = b2CollideMoverAndCircle(&shape.circle,&localMover);
+    else if (shape.shapeType == 1i32) result = b2CollideMoverAndCapsule(&shape.capsule,&localMover);
+    else if (shape.shapeType == 2i32) result = b2CollideMoverAndSegment(&shape.segment,&localMover);
+    else if (shape.shapeType == 3i32) result = b2CollideMoverAndPolygon(&shape.polygon,&localMover);
+    else if (shape.shapeType == 4i32) result = b2CollideMoverAndSegment(&shape.chainSegment.segment,&localMover);
+    if (result.hit) result.plane.normal = b2RotateVector(xf.q,result.plane.normal);
+    return result;
+}
+
+# mover.c:8-55. Raw contract: 0 <= count <= planes.length()
+# The only mutable borrow is the active range, and no reference escapes the call.
+fun b2SolvePlanes(targetDelta: Vec2, planes: ref List[CollisionPlane], count: i32) -> PlaneSolverResult = {
+    var i: i32 = 0i32; while (i < count) { planes.at(i as i64).push = 0.0f32; i += 1i32; }
+    var delta: Vec2 = targetDelta; var iteration: i32 = 0i32; var done: bool = false;
+    while (iteration < 20i32 and not done) {
+        var totalPush: f32 = 0.0f32; var planeIndex: i32 = 0i32;
+        while (planeIndex < count) {
+            var plane: ref CollisionPlane = planes.at(planeIndex as i64);
+            let separation: f32 = b2PlaneSeparation(plane.plane,delta)+B2_LINEAR_SLOP;
+            var push: f32 = -separation; let accumulatedPush: f32 = plane.push;
+            plane.push = poly.b2ClampFloat(plane.push+push,0.0f32,plane.pushLimit);
+            push = plane.push-accumulatedPush; delta = b2MulAdd(delta,push,plane.plane.normal);
+            totalPush += motion.b2AbsFloat(push); planeIndex += 1i32;
+        }
+        if (totalPush < B2_LINEAR_SLOP) done = true; else iteration += 1i32;
+    }
+    return PlaneSolverResult(delta,iteration);
+}
+# mover.c:57-73. Read-only borrow, ignored fields are not consulted.
+fun b2ClipVector(vector: Vec2, planes: ref List[CollisionPlane], count: i32) -> Vec2 = {
+    var v: Vec2 = vector; var planeIndex: i32 = 0i32;
+    while (planeIndex < count) {
+        let plane: CollisionPlane = planes.at(planeIndex as i64);
+        if (not (plane.push == 0.0f32) and plane.clipVelocity) v = distance.b2MulSub(v,poly.b2MinFloat(0.0f32,poly.b2Dot(v,plane.plane.normal)),plane.plane.normal);
+        planeIndex += 1i32;
+    }
+    return v;
+}
+
+fun emptyCollisionPlanes() -> List[CollisionPlane] = { var values: List[CollisionPlane]; return values; }
+class MoverVectorResult { status: i32 = 0i32; reason: i32 = 0i32; value: Vec2 = Vec2(); }
+class MoverSolveResult {
+    status: i32 = 0i32; reason: i32 = 0i32; translation: Vec2 = Vec2(); iterationCount: i32 = 0i32;
+    planes: List[CollisionPlane] = emptyCollisionPlanes();
+}
+
+# Public checked calls and refusals share this preflight.
+# Count is checked before indexing; Solve ignores old push, Clip ignores offset/limit.
+fun planePreflight(vector: Vec2, planes: ref List[CollisionPlane], count: i32, solve: bool) -> distance.Validation = {
+    if (not local.finiteVector(vector) or count < 0i32 or count as i64 > planes.length()) return distance.Validation(5i32,22i32);
+    var i: i32 = 0i32;
+    while (i < count) {
+        let plane: CollisionPlane = planes.at(i as i64);
+        if (solve) {
+            if (not b2IsValidPlane(plane.plane) or not distance.validRadius(plane.pushLimit)) return distance.Validation(5i32,22i32);
+        } else if (not (plane.push == 0.0f32) and plane.clipVelocity) {
+            if (not distance.finite(plane.push) or not local.finiteVector(plane.plane.normal) or not world.b2IsNormalized(plane.plane.normal)) return distance.Validation(5i32,22i32);
+        }
+        i += 1i32;
+    }
+    return distance.Validation();
+}
+
+fun solvePlanes(targetDelta: Vec2, planes: ref List[CollisionPlane], count: i32) -> MoverSolveResult = {
+    var result = MoverSolveResult(); let gate: distance.Validation = planePreflight(targetDelta,planes,count,true);
+    result.status = gate.status; result.reason = gate.reason; if (gate.status != 0i32) return result;
+    var i: i32 = 0i32; while (i < count) { result.planes.push(planes.at(i as i64)); i += 1i32; }
+    let solved: PlaneSolverResult = b2SolvePlanes(targetDelta,&result.planes,count);
+    var valid: bool = local.finiteVector(solved.translation); i = 0i32;
+    while (i < count) { if (not distance.finite(result.planes.at(i as i64).push)) valid = false; i += 1i32; }
+    if (not valid) { result = MoverSolveResult(); result.status = 5i32; result.reason = 22i32; return result; }
+    result.translation = solved.translation; result.iterationCount = solved.iterationCount; return result;
+}
+
+fun clipVector(vector: Vec2, planes: ref List[CollisionPlane], count: i32) -> MoverVectorResult = {
+    var result = MoverVectorResult(); let gate: distance.Validation = planePreflight(vector,planes,count,false);
+    result.status = gate.status; result.reason = gate.reason; if (gate.status != 0i32) return result;
+    let clipped: Vec2 = b2ClipVector(vector,planes,count);
+    if (not local.finiteVector(clipped)) { result.status = 5i32; result.reason = 22i32; return result; }
+    result.value = clipped; return result;
+}
+
+class MoverScalarResult { status: i32 = 0i32; reason: i32 = 0i32; value: f32 = 0.0f32; }
+class MoverPlaneHit {
+    shapeId: broad.ShapeId = broad.ShapeId(); shape: game.ShapeNumber = game.ShapeNumber();
+    body: game.BodyNumber = game.BodyNumber(); result: PlaneResult = PlaneResult();
+}
+fun emptyMoverHits() -> List[MoverPlaneHit] = { var values: List[MoverPlaneHit]; return values; }
+class MoverPlanesResult { status: i32 = 0i32; reason: i32 = 0i32; values: List[MoverPlaneHit] = emptyMoverHits(); }
+fun continuePlane(id: broad.ShapeId, result: ref PlaneResult, context: Key64) -> bool = { return true; }
+
+# world.c:2385-2537. Frames own callback values, never another world or lifetime pool.
+class MoverFrame {
+    slot: i32 = 0i32; filter: query.QueryFilter = query.QueryFilter(); capsule: world.Capsule = world.Capsule();
+    callback: funptr(broad.ShapeId,ref PlaneResult,Key64) -> bool = continuePlane; context: Key64 = Key64();
+    fraction: f32 = 1.0f32; checked: bool = false; checkedFilter: query.CheckedQueryFilter = query.CheckedQueryFilter();
+    failed: bool = false; hits: List[MoverPlaneHit] = emptyMoverHits();
+}
+fun emptyMoverFrames() -> List[MoverFrame] = { var values: List[MoverFrame]; return values; }
+var moverFrames: List[MoverFrame] = emptyMoverFrames(); var moverDepth: i32 = 0i32;
+fun pushMoverFrame(frame: MoverFrame) -> i32 = {
+    let index: i32 = moverDepth;
+    if (index as i64 == moverFrames.length()) moverFrames.push(move frame); else moverFrames.at(index as i64) = move frame;
+    moverDepth += 1i32; return index;
+}
+fun moverCastCallback(input: ref local.ShapeCastInput, proxyId: i32, user: i64, token: Key64) -> f32 = {
+    let frame: ref MoverFrame = moverFrames.at(token.low as i64);
+    var w: ref world.World = world.worlds.at(frame.slot as i64); var shape: ref world.ShapeRecord = w.shapes.at(user);
+    if (not query.b2ShouldQueryCollide(shape.filter,frame.filter)) return frame.fraction;
+    if (frame.checked and not query.checkedCandidate(w,shape,frame.checkedFilter)) return frame.fraction;
+    let output: local.CastOutput = query.b2ShapeCastShape(input,shape,query.shapeTransform(w,shape));
+    if (frame.checked and not distance.finite(output.fraction)) { moverFrames.at(token.low as i64).failed = true; return 0.0f32; }
+    if (output.fraction == 0.0f32) return frame.fraction;
+    moverFrames.at(token.low as i64).fraction = output.fraction; return output.fraction;
+}
+fun moverCollideCallback(proxyId: i32, user: i64, token: Key64) -> bool = {
+    let frame: ref MoverFrame = moverFrames.at(token.low as i64);
+    var w: ref world.World = world.worlds.at(frame.slot as i64); var shape: ref world.ShapeRecord = w.shapes.at(user);
+    if (not query.b2ShouldQueryCollide(shape.filter,frame.filter)) return true;
+    if (frame.checked and not query.checkedCandidate(w,shape,frame.checkedFilter)) return true;
+    var capsule: world.Capsule = frame.capsule;
+    var result: PlaneResult = b2CollideMover(shape,query.shapeTransform(w,shape),&capsule);
+    if (not result.hit or not world.b2IsNormalized(result.plane.normal)) return true;
+    let id: broad.ShapeId = world.b2MakeShapeId(w,user as i32);
+    if (frame.checked) {
+        if (not local.finiteVector(result.point) or not b2IsValidPlane(result.plane)) { moverFrames.at(token.low as i64).failed = true; return false; }
+        let numbers: query.ShapeQueryValue = query.shapeQueryValue(w,id);
+        moverFrames.at(token.low as i64).hits.push(MoverPlaneHit(id,numbers.shape,numbers.body,result));
+    }
+    # Copy the call arguments before a nested user query can grow moverFrames.
+    let callback: funptr(broad.ShapeId,ref PlaneResult,Key64) -> bool = frame.callback; let context: Key64 = frame.context;
+    return callback(id,&result,context);
+}
+fun worldCastMover(id: world.WorldId, capsule: ref world.Capsule, translation: Vec2, frame: MoverFrame) -> f32 = {
+    if (asserts.B2_ENABLE_ASSERT) {
+        asserts.b2Assert(world.b2IsValidVec2(translation),"b2IsValidVec2( translation )\0","world.c\0",2436i32);
+        asserts.b2Assert(capsule.radius > 2.0f32*B2_LINEAR_SLOP,"mover->radius > 2.0f * B2_LINEAR_SLOP\0","world.c\0",2437i32);
+    }
+    var w: ref world.World = world.worlds.at((id.index1-1u16) as i64); if (not world.b2WorldUnlocked(w)) return 1.0f32;
+    var input = local.ShapeCastInput(); input.proxy = local.capsuleProxy(capsule); input.translation = translation;
+    input.maxFraction = 1.0f32; input.canEncroach = true;
+    let mask: i64 = frame.filter.maskBits;
+    let index: i32 = pushMoverFrame(move frame); var i: i32 = 0i32; var stopped: bool = false;
+    while (i < 3i32 and not stopped) {
+        query.b2DynamicTree_ShapeCast(&w.broadPhase.trees[i],&input,mask,moverCastCallback,Key64(index as u32,0u32));
+        let fraction: f32 = moverFrames.at(index as i64).fraction;
+        stopped = fraction == 0.0f32 or moverFrames.at(index as i64).failed; input.maxFraction = fraction; i += 1i32;
+    }
+    let finalFraction: f32 = moverFrames.at(index as i64).fraction; moverDepth -= 1i32; return finalFraction;
+}
+fun worldCollideMover(id: world.WorldId, capsule: ref world.Capsule, frame: MoverFrame) -> () = {
+    var w: ref world.World = world.worlds.at((id.index1-1u16) as i64); if (not world.b2WorldUnlocked(w)) return;
+    let radius = Vec2(capsule.radius,capsule.radius);
+    let boxA = tree.AABB(b2Sub(tree.b2Min(capsule.center1,capsule.center2),radius),b2Add(tree.b2Max(capsule.center1,capsule.center2),radius));
+    let mask: i64 = frame.filter.maskBits;
+    let index: i32 = pushMoverFrame(move frame); var i: i32 = 0i32;
+    while (i < 3i32 and not moverFrames.at(index as i64).failed) {
+        query.b2DynamicTree_Query(&w.broadPhase.trees[i],boxA,mask,moverCollideCallback,Key64(index as u32,0u32)); i += 1i32;
+    }
+    moverDepth -= 1i32;
+}
+fun b2World_CastMover(id: world.WorldId, capsule: ref world.Capsule, translation: Vec2, filter: query.QueryFilter) -> f32 = {
+    var frame = MoverFrame(); frame.slot = (id.index1-1u16) as i32; frame.filter = filter;
+    return worldCastMover(id,capsule,translation,move frame);
+}
+fun b2World_CollideMover(id: world.WorldId, capsule: ref world.Capsule, filter: query.QueryFilter,
+    callback: funptr(broad.ShapeId,ref PlaneResult,Key64) -> bool, context: Key64) -> () = {
+    var frame = MoverFrame(); frame.slot = (id.index1-1u16) as i32; frame.filter = filter; frame.capsule = capsule; frame.callback = callback; frame.context = context;
+    worldCollideMover(id,capsule,move frame);
+}
+
+# Reuse the production lifetime/exclusion/lock/enum gate before mover geometry.
+fun moverWorldPreflight(owner: game.WorldNumber, capsule: ref world.Capsule, translation: Vec2,
+    filter: query.CheckedQueryFilter, casting: bool) -> distance.Validation = {
+    var description = query.QueryDescription(); description.owner = owner; description.filter = filter;
+    let common: distance.Validation = query.queryPreflight(&description); if (common.status != 0i32) return common;
+    if (not local.finiteVector(capsule.center1) or not local.finiteVector(capsule.center2) or not distance.validRadius(capsule.radius)) return distance.Validation(5i32,22i32);
+    if (casting and (not local.finiteVector(translation) or not (capsule.radius > 2.0f32*B2_LINEAR_SLOP))) return distance.Validation(5i32,22i32);
+    return distance.Validation();
+}
+fun checkedCastMover(owner: game.WorldNumber, capsule: ref world.Capsule, translation: Vec2, checked: query.CheckedQueryFilter) -> MoverScalarResult = {
+    var result = MoverScalarResult();
+    let gate: distance.Validation = moverWorldPreflight(owner,capsule,translation,checked,true);
+    result.status = gate.status; result.reason = gate.reason; if (gate.status != 0i32) return result;
+    var frame = MoverFrame(); frame.slot = owner.slot; frame.filter = checked.raw; frame.checked = true; frame.checkedFilter = checked;
+    let index: i32 = moverDepth; let id = world.WorldId((owner.slot+1i32) as u16,world.worlds.at(owner.slot as i64).generation);
+    let fraction: f32 = worldCastMover(id,capsule,translation,move frame);
+    if (moverFrames.at(index as i64).failed or not distance.finite(fraction)) { result.status = 5i32; result.reason = 22i32; return result; }
+    result.value = fraction; return result;
+}
+fun checkedCollideMover(owner: game.WorldNumber, capsule: ref world.Capsule, checked: query.CheckedQueryFilter,
+    callback: funptr(broad.ShapeId,ref PlaneResult,Key64) -> bool = continuePlane, context: Key64 = Key64()) -> MoverPlanesResult = {
+    var result = MoverPlanesResult();
+    let gate: distance.Validation = moverWorldPreflight(owner,capsule,Vec2(),checked,false);
+    result.status = gate.status; result.reason = gate.reason; if (gate.status != 0i32) return result;
+    var frame = MoverFrame(); frame.slot = owner.slot; frame.filter = checked.raw; frame.capsule = capsule; frame.checked = true; frame.checkedFilter = checked; frame.callback = callback; frame.context = context;
+    let index: i32 = moverDepth; let id = world.WorldId((owner.slot+1i32) as u16,world.worlds.at(owner.slot as i64).generation);
+    worldCollideMover(id,capsule,move frame);
+    if (moverFrames.at(index as i64).failed) { result.status = 5i32; result.reason = 22i32; return result; }
+    result.values = copy moverFrames.at(index as i64).hits; return result;
+}
+fun castMover(owner: game.WorldNumber, capsule: ref world.Capsule, translation: Vec2, filter: query.WorldQueryFilter) -> MoverScalarResult = {
+    return checkedCastMover(owner,capsule,translation,query.checkFilter(filter));
+}
+fun collideMoverCollect(owner: game.WorldNumber, capsule: ref world.Capsule, filter: query.WorldQueryFilter) -> MoverPlanesResult = {
+    return checkedCollideMover(owner,capsule,query.checkFilter(filter));
+}
+
+class MoverPlaneResult { status: i32 = 0i32; reason: i32 = 0i32; value: PlaneResult = PlaneResult(); }
+fun localMoverPreflight(kind: i32, target: ref distance.ShapeProxy, capsule: ref world.Capsule, plane: Plane = Plane(), point: Vec2 = Vec2()) -> distance.Validation = {
+    if (kind == 5i32) return distance.Validation();
+    if (kind == 6i32) { if (not b2IsValidPlane(plane) or not local.finiteVector(point)) return distance.Validation(5i32,22i32); return distance.Validation(); }
+    if (kind < 0i32 or kind > 3i32) return distance.Validation(5i32,22i32);
+    if (not local.finiteVector(capsule.center1) or not local.finiteVector(capsule.center2) or not distance.validRadius(capsule.radius)) return distance.Validation(5i32,22i32);
+    if ((kind == 0i32 and target.count != 1i32) or ((kind == 1i32 or kind == 2i32) and target.count != 2i32) or (kind == 3i32 and (target.count < 3i32 or target.count > 8i32))) return distance.Validation(4i32,0i32);
+    if (kind != 2i32 and not distance.validRadius(target.radius)) return distance.Validation(5i32,22i32);
+    if (not distance.validProxyPoints(&target.points,target.count)) return distance.Validation(5i32,22i32);
+    if (kind == 3i32) { var polygon = poly.Polygon(); polygon.count = target.count; polygon.vertices = target.points; if (not game.validPolygonPoints(&polygon)) return distance.Validation(4i32,0i32); }
+    return distance.Validation();
+}
+fun checkedLocalMover(kind: i32, target: ref distance.ShapeProxy, capsule: ref world.Capsule) -> MoverPlaneResult = {
+    var result = MoverPlaneResult(); let gate: distance.Validation = localMoverPreflight(kind,target,capsule);
+    result.status = gate.status; result.reason = gate.reason; if (gate.status != 0i32) return result;
+    if (kind == 0i32) { var circle = Circle(target.points[0i32],target.radius); result.value = b2CollideMoverAndCircle(&circle,capsule); }
+    if (kind == 1i32) { var other = world.Capsule(target.points[0i32],target.points[1i32],target.radius); result.value = b2CollideMoverAndCapsule(&other,capsule); }
+    if (kind == 2i32) { var segment = world.Segment(target.points[0i32],target.points[1i32]); result.value = b2CollideMoverAndSegment(&segment,capsule); }
+    if (kind == 3i32) { var polygon = poly.Polygon(); polygon.count = target.count; polygon.vertices = target.points; polygon.radius = target.radius; result.value = b2CollideMoverAndPolygon(&polygon,capsule); }
+    if (not local.finiteVector(result.value.point) or not local.finiteVector(result.value.plane.normal) or not distance.finite(result.value.plane.offset)) { result = MoverPlaneResult(); result.status = 5i32; result.reason = 22i32; }
+    return result;
+}
+fun collideMoverAndCircle(shape: ref Circle, capsule: ref world.Capsule) -> MoverPlaneResult = { var proxy: distance.ShapeProxy = local.circleProxy(shape); return checkedLocalMover(0i32,&proxy,capsule); }
+fun collideMoverAndCapsule(shape: ref world.Capsule, capsule: ref world.Capsule) -> MoverPlaneResult = { var proxy: distance.ShapeProxy = local.capsuleProxy(shape); return checkedLocalMover(1i32,&proxy,capsule); }
+fun collideMoverAndSegment(shape: ref world.Segment, capsule: ref world.Capsule) -> MoverPlaneResult = { var proxy: distance.ShapeProxy = local.segmentProxy(shape); return checkedLocalMover(2i32,&proxy,capsule); }
+fun collideMoverAndPolygon(shape: ref poly.Polygon, capsule: ref world.Capsule) -> MoverPlaneResult = {
+    var proxy = distance.ShapeProxy(); proxy.points = shape.vertices; proxy.count = shape.count; proxy.radius = shape.radius; return checkedLocalMover(3i32,&proxy,capsule);
+}
+fun planeSeparation(plane: Plane, point: Vec2) -> MoverScalarResult = {
+    var result = MoverScalarResult(); var proxy = distance.ShapeProxy(); var capsule = world.Capsule();
+    let gate: distance.Validation = localMoverPreflight(6i32,&proxy,&capsule,plane,point); result.status = gate.status; result.reason = gate.reason; if (gate.status != 0i32) return result;
+    let value: f32 = b2PlaneSeparation(plane,point); if (not distance.finite(value)) { result.status = 5i32; result.reason = 22i32; } else result.value = value; return result;
+}

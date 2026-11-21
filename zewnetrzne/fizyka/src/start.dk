@@ -1,0 +1,188 @@
+# Convenience only; all physical changes go through the public gra API.
+import fizyka.gra as game;
+import fizyka.swiat as model;
+import fizyka.kola.*;
+import fizyka.zbior.*;
+import std.math as math;
+
+class GameSettings {
+    physics: game.SolverWorldParameters = game.SolverWorldParameters();
+    enableSleeping: bool = true;
+    enableContinuous: bool = true;
+    stepsPerSecond: i32 = 60i32;
+    subStepCount: i32 = 4i32;
+    maxStepsPerFrame: i32 = 8i32;
+    pixelsPerMetre: f32 = 50.0f32;
+    screenOrigin: Vec2 = Vec2(400.0f32, 500.0f32);
+}
+class GameSession {
+    world: game.WorldNumber = game.WorldNumber();
+    settings: GameSettings = GameSettings();
+    pendingUnits: i64 = 0i64;
+    remainingBudget: i32 = 0i32;
+    stepIndex: i64 = 0i64;
+    paused: bool = false;
+}
+class GameResult {
+    status: i32 = game.STALE;
+    session: GameSession = GameSession();
+}
+class ObjectSettings {
+    dynamic: bool = true;
+    velocity: Vec2 = Vec2();
+    density: f32 = 1.0f32;
+    friction: f32 = 0.6f32;
+    restitution: f32 = 0.0f32;
+    fixedRotation: bool = false;
+    hasObjectId: bool = false;
+    objectId: Key64 = Key64();
+}
+class FrameBudget {
+    status: i32 = game.STALE;
+    steps: i32 = 0i32;
+}
+
+fun openGame(settings: GameSettings = GameSettings()) -> GameResult = {
+    var result = GameResult();
+    if (settings.stepsPerSecond < 1i32 or settings.stepsPerSecond > 240i32
+        or settings.subStepCount < 1i32 or settings.subStepCount > 64i32
+        or settings.maxStepsPerFrame < 1i32 or settings.maxStepsPerFrame > 64i32
+        or not game.finite(settings.pixelsPerMetre) or settings.pixelsPerMetre <= 0.0f32
+        or not game.finiteVector(settings.screenOrigin)
+        or not game.validSolverWorldParameters(settings.physics)) {
+        result.status = game.PARAM;
+        return result;
+    }
+    let created = game.createSleepWorld(settings.physics.gravity,
+        settings.physics.maximumLinearSpeed, settings.physics, settings.enableSleeping);
+    result.status = created.status;
+    if (result.status != game.OK) return result;
+    result.status = game.enableContinuous(created.number, settings.enableContinuous);
+    if (result.status != game.OK) {
+        game.destroyWorld(created.number);
+        return result;
+    }
+    result.session.world = created.number;
+    result.session.settings = settings;
+    return result;
+}
+
+fun closeGame(session: ref GameSession) -> i32 = {
+    let status: i32 = game.destroyWorld(session.world);
+    if (status == game.OK) session = GameSession();
+    return status;
+}
+
+# Only value descriptions are constructed here; no access to model storage.
+fun objectBody(position: Vec2, options: ObjectSettings) -> model.BodyDef = {
+    var description = model.BodyDef();
+    description.bodyType = if options.dynamic then 2i32 else 0i32;
+    description.position = position;
+    description.linearVelocity = options.velocity;
+    description.fixedRotation = options.fixedRotation;
+    return description;
+}
+fun objectMaterial(options: ObjectSettings) -> model.ShapeRecord = {
+    var description = model.ShapeRecord();
+    description.density = options.density;
+    description.friction = options.friction;
+    description.restitution = options.restitution;
+    return description;
+}
+fun addBall(session: ref GameSession, position: Vec2,
+    radius: f32 = 0.5f32, options: ObjectSettings = ObjectSettings()) -> game.PairResult = {
+    var description = objectMaterial(options);
+    description.circle = Circle(Vec2(), radius);
+    return game.createBodyWithShape(session.world, objectBody(position, options),
+        description, true, options.hasObjectId, options.objectId);
+}
+fun addBox(session: ref GameSession, position: Vec2,
+    halfSize: Vec2 = Vec2(0.5f32, 0.5f32),
+    options: ObjectSettings = ObjectSettings()) -> game.PairResult = {
+    var geometry = game.BoxGeometry();
+    geometry.halfWidth = halfSize.x;
+    geometry.halfHeight = halfSize.y;
+    return game.createBodyWithBox(session.world, objectBody(position, options),
+        geometry, objectMaterial(options), true, options.hasObjectId, options.objectId);
+}
+
+fun queueTime(session: ref GameSession, elapsedNanoseconds: i64) -> FrameBudget = {
+    let status: i32 = game.worldMutationStatus(session.world);
+    if (status != game.OK) return FrameBudget(status, 0i32);
+    if (elapsedNanoseconds < 0i64) return FrameBudget(game.PARAM, 0i32);
+    if (session.paused) return FrameBudget(game.OK, 0i32);
+    let hz: i64 = session.settings.stepsPerSecond as i64;
+    if (elapsedNanoseconds > (9223372036854775807i64 - session.pendingUnits) / hz)
+        return FrameBudget(game.LIMIT, 0i32);
+    session.pendingUnits = session.pendingUnits + elapsedNanoseconds * hz;
+    session.remainingBudget = math.min(session.pendingUnits / 1000000000i64,
+        session.settings.maxStepsPerFrame as i64) as i32;
+    return FrameBudget(game.OK, session.remainingBudget);
+}
+
+fun tick(session: ref GameSession) -> game.StepResult = {
+    var result = game.StepResult();
+    result.status = game.worldMutationStatus(session.world);
+    if (result.status != game.OK) return result;
+    if (session.paused or session.remainingBudget <= 0i32 or session.pendingUnits < 1000000000i64) {
+        result.status = game.PARAM; result.reason = 1001i32; return result;
+    }
+    if (session.stepIndex == 9223372036854775807i64) { result.status = game.LIMIT; return result; }
+    result = game.step(session.world, game.StepParameters(
+        1.0f32 / (session.settings.stepsPerSecond as f32), session.settings.subStepCount));
+    if (result.status == game.OK) {
+        session.pendingUnits = session.pendingUnits - 1000000000i64;
+        session.remainingBudget = session.remainingBudget - 1i32;
+        session.stepIndex = session.stepIndex + 1i64;
+    }
+    return result;
+}
+fun manualStep(session: ref GameSession) -> game.StepResult = {
+    var result = game.StepResult();
+    result.status = game.worldMutationStatus(session.world);
+    if (result.status != game.OK) return result;
+    if (not session.paused) { result.status = game.PARAM; result.reason = 1002i32; return result; }
+    if (session.stepIndex == 9223372036854775807i64) { result.status = game.LIMIT; return result; }
+    result = game.step(session.world, game.StepParameters(
+        1.0f32 / (session.settings.stepsPerSecond as f32), session.settings.subStepCount));
+    if (result.status == game.OK) session.stepIndex = session.stepIndex + 1i64;
+    return result;
+}
+fun setPaused(session: ref GameSession, paused: bool) -> i32 = {
+    let status: i32 = game.worldMutationStatus(session.world);
+    if (status != game.OK) return status;
+    if (session.paused != paused) {
+        session.paused = paused;
+        session.pendingUnits = 0i64;
+        session.remainingBudget = 0i32;
+    }
+    return game.OK;
+}
+
+fun toScreen(session: ref GameSession, metres: Vec2) -> game.VectorResult = {
+    let status: i32 = game.worldStatus(session.world);
+    if (status != game.OK) return game.VectorResult(status, Vec2());
+    if (not game.finiteVector(metres)) return game.VectorResult(game.PARAM, Vec2());
+    let value = Vec2(session.settings.screenOrigin.x + metres.x * session.settings.pixelsPerMetre,
+        session.settings.screenOrigin.y - metres.y * session.settings.pixelsPerMetre);
+    if (not game.finiteVector(value)) return game.VectorResult(game.PARAM, Vec2());
+    return game.VectorResult(game.OK, value);
+}
+fun toWorld(session: ref GameSession, pixels: Vec2) -> game.VectorResult = {
+    let status: i32 = game.worldStatus(session.world);
+    if (status != game.OK) return game.VectorResult(status, Vec2());
+    if (not game.finiteVector(pixels)) return game.VectorResult(game.PARAM, Vec2());
+    let value = Vec2((pixels.x - session.settings.screenOrigin.x) / session.settings.pixelsPerMetre,
+        (session.settings.screenOrigin.y - pixels.y) / session.settings.pixelsPerMetre);
+    if (not game.finiteVector(value)) return game.VectorResult(game.PARAM, Vec2());
+    return game.VectorResult(game.OK, value);
+}
+fun sizeToPixels(session: ref GameSession, metres: Vec2) -> game.VectorResult = {
+    let status: i32 = game.worldStatus(session.world);
+    if (status != game.OK) return game.VectorResult(status, Vec2());
+    if (not game.finiteVector(metres) or metres.x < 0.0f32 or metres.y < 0.0f32)
+        return game.VectorResult(game.PARAM, Vec2());
+    let value = Vec2(metres.x * session.settings.pixelsPerMetre, metres.y * session.settings.pixelsPerMetre);
+    if (not game.finiteVector(value)) return game.VectorResult(game.PARAM, Vec2());
+    return game.VectorResult(game.OK, value);
+}
