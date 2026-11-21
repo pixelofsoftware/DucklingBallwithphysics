@@ -1,5 +1,7 @@
 # Piłki z fizyką
 
+![Napisane w Duckling](https://img.shields.io/badge/napisane%20w-Duckling-f2c94c)
+
 Krok 5 tutorialu **„Gry 2D w Ducklingu: pakiety grafika i fizyka, od okna do pierwszej gry”**.
 Kliknięcie wrzuca piłkę w miejscu kursora. Piłki spadają, odbijają się i układają na podłodze. Ruch i zderzenia liczy pakiet `fizyka` (port Box2D 3.1.1 do Ducklinga), a gra tylko rysuje.
 Do tego pomysł ze slajdu „Grawitacja”: klawisz, który odwraca grawitację.
